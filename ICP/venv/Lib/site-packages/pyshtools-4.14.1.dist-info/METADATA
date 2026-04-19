@@ -1,0 +1,181 @@
+Metadata-Version: 2.1
+Name: pyshtools
+Version: 4.14.1
+Summary: SHTOOLS - Spherical Harmonic Tools
+Keywords: Spherical Harmonics,Spectral Estimation,Slepian Functions,Legendre Functions,Gravity Field,Magnetic Field
+Author-Email: The SHTOOLS developers <mark.wieczorek@ipgp.fr>
+License: BSD-3-Clause
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Science/Research
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: BSD License
+Classifier: Natural Language :: English
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Fortran
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: Scientific/Engineering
+Classifier: Topic :: Scientific/Engineering :: GIS
+Classifier: Topic :: Scientific/Engineering :: Mathematics
+Classifier: Topic :: Scientific/Engineering :: Physics
+Project-URL: homepage, https://shtools.github.io/SHTOOLS/
+Project-URL: download, https://github.com/SHTOOLS/SHTOOLS/zipball/master
+Requires-Python: >=3.10
+Requires-Dist: numpy>=1.23.5
+Requires-Dist: scipy>=0.14.0
+Requires-Dist: matplotlib>=3.3
+Requires-Dist: astropy>=4.0
+Requires-Dist: xarray
+Requires-Dist: requests
+Requires-Dist: pooch>=1.1
+Requires-Dist: tqdm
+Requires-Dist: boule>=0.5.0
+Provides-Extra: cartopy
+Requires-Dist: cartopy>=0.18.0; extra == "cartopy"
+Provides-Extra: pygmt
+Requires-Dist: pygmt>=0.7; extra == "pygmt"
+Provides-Extra: palettable
+Requires-Dist: palettable>=3.3; extra == "palettable"
+Provides-Extra: ducc
+Requires-Dist: ducc0>=0.15; extra == "ducc"
+Description-Content-Type: text/markdown
+
+<p align="center">
+    <img alt="SHTOOLS LOGO" src="misc/logo.png" width="100%">
+    <a href="https://shtools.github.io/SHTOOLS/"><img alt="Documentation" src="https://img.shields.io/badge/documentation-shtools.github.io%2FSHTOOLS%2F-yellow.svg"></a>
+    <a href="https://doi.org/10.5281/zenodo.592762"><img alt="DOI" src="https://zenodo.org/badge/doi/10.5281/zenodo.592762.svg"></a>
+    <a href="https://doi.org/10.1029/2018GC007529"><img alt="Paper" src="https://img.shields.io/badge/paper-10.1029/2018GC007529-orange.svg"></a>
+    <a href="https://mybinder.org/v2/gh/SHTOOLS/SHTOOLS/master?filepath=examples%2Fnotebooks%2F"><img alt="Binder" src="https://mybinder.org/badge_logo.svg"></a>
+    <a href="https://matrix.to/#/%23pyshtools:matrix.org"><img alt="Chat on matrix" src="https://img.shields.io/badge/chat-on_[matrix]-4bb596.svg"></a>
+    <a href="https://app.gitter.im/#/room/#pyshtools:matrix.org"><img alt="Chat at gitter" src="https://badges.gitter.im/SHTOOLS/SHTOOLS.svg"></a>
+    <img alt="License" src="https://img.shields.io/badge/License-BSD_3--Clause-brightgreen.svg">
+    <a href="https://fosstodon.org/@shtools"><img alt="Mastodon Follow" src="https://img.shields.io/mastodon/follow/108112567255227248?domain=https%3A%2F%2Ffosstodon.org&style=social"></a>
+</p>
+
+SHTOOLS/pyshtools is a Fortran-95/Python library that can be used for spherical harmonic transforms, multitaper spectral analyses, expansions of gridded data into Slepian basis functions, standard operations on global gravitational and magnetic field data.
+
+### TABLE OF CONTENTS
+<!-- toc -->
+
+- [FEATURES](#features)
+- [HOW TO USE](#how-to-use)
+- [INSTALLATION](#installation)
+  - [pyshtools (for Python)](#pyshtools-for-python)
+    - [Install using `conda`](#install-using-conda)
+    - [Install using `pip`](#install-using-pip)
+    - [For Developers](#for-developers)
+  - [SHTOOLS (for Fortran 95)](#shtools-for-fortran-95)
+    - [Install using the `brew` package manager (MacOS, Linux, Windows)](#install-using-the-brew-package-manager-macos-linux-windows)
+    - [Install using the `macports` package manager (MacOS)](#install-using-the-macports-package-manager-macos)
+    - [Install from source](#install-from-source)
+- [CONTRIBUTING](#contributing)
+- [MAINTAINERS AND CONTRIBUTORS](#maintainers-and-contributors)
+- [LICENSE](#license)
+- [REFERENCES](#references)
+
+<!-- tocstop -->
+
+### FEATURES
+
+* Supports all standard normalizations and phase conventions of the spherical harmonic functions.
+
+* Effortless conversion between real and complex harmonics, and between different normalization and phase conventions.
+
+* Use of both regularly sampled geographic grids and grids appropriate for Gauss-Legendre quadrature.
+
+* Spherical harmonic transforms proven to be accurate up to about degree 2800 for the native Fortran 95 backend and beyond using the [DUCC0](https://gitlab.mpcdf.mpg.de/mtr/ducc) backend.
+
+* Perform localized multitaper spectral analyses, or expand gridded data in terms of localized Slepian basis functions.
+
+* Support for standard data and file formats, including *xarray* and *netcdf*.
+
+* Import research-grade gravity, topography, and magnetic field datasets with a single command.
+
+* Creation of publication quality maps using [Cartopy](https://scitools.org.uk/cartopy) and [PyGMT](https://scitools.org.uk/cartopy/docs/latest).
+
+* Support multithreaded programming using the [OpenMP](https://www.openmp.org) API.
+
+### HOW TO USE
+
+A variety of Python tutorials and guides are available to explain the main library features. To get started, click on the following Python tutorials and run them interactively in Binder:
+
+* [Spherical harmonic coefficients and grids](https://nbviewer.jupyter.org/github/SHTOOLS/SHTOOLS/blob/master/examples/notebooks/grids-and-coefficients.ipynb)
+* [Localization windows and spectral analysis](https://nbviewer.jupyter.org/github/SHTOOLS/SHTOOLS/blob/master/examples/notebooks/localized-spectral-analysis.ipynb)
+* [Gravity and magnetic fields](https://nbviewer.jupyter.org/github/SHTOOLS/SHTOOLS/blob/master/examples/notebooks/gravity-and-magnetic-fields.ipynb)
+* [Plotting maps](https://nbviewer.jupyter.org/github/SHTOOLS/SHTOOLS/blob/master/examples/notebooks/plotting-maps.ipynb)
+
+### INSTALLATION
+
+SHTOOLS can be invoked in any Fortran 95 or Python program. The core software is written in Fortran 95, and Python wrappers and dedicated classes allow simple access to the fortran-compiled routines. To install it, run these commands below:
+
+#### pyshtools (for Python)
+
+##### Install using `conda`:
+```bash
+conda install -c conda-forge pyshtools
+conda update -c conda-forge pyshtools  # to upgrade a pre-existing installation
+```
+
+##### Install using `pip`:
+```bash
+pip install pyshtools
+pip install --upgrade pyshtools  # to upgrade a pre-existing installation
+pip install pyshtools --no-binary pyshtools  # build from source
+pip install git+https://github.com/SHTOOLS/SHTOOLS@develop  # install the develop branch from source
+```
+
+##### For developers:
+Install the system level build requirements:
+```bash
+sudo apt-get install build-essential cmake gfortran  # Debian, Ubuntu and derivatives
+sudo dnf group install "C Development Tools and Libraries" "Development Tools"  # Fedora, Centos, RHEL and derivatives
+sudo dnf install cmake gcc-fortran  # Fedora, Centos, RHEL and derivatives
+xcode-select --install  # macOS
+```
+
+Then clone the shtools repo, install the other dependencies, and install manually in a conda environment:
+```bash
+git clone https://github.com/SHTOOLS/SHTOOLS.git
+cd shtools
+conda create -n your_env_name python=3.xx  # create a new conda environment, if desired
+conda env update -n your_env_name -f environment.yml
+conda activate your_env_name  # activate the new conda environment
+pip install --no-build-isolation -e .  # install into the shtools folder and link to the active python environment
+```
+
+#### SHTOOLS (for Fortran 95)
+
+##### Install using the [brew](http://brew.sh/) package manager (MacOS, Linux, Windows):
+```bash
+brew install shtools
+```
+
+##### Install using the [macports](https://www.macports.org/) package manager (MacOS):
+```bash
+sudo port install shtools
+```
+
+##### Install from source:
+Clone or download the this repo, and then execute one (or both) of the following commands in the `shtools` directory:
+```bash
+make fortran
+make fortran-mp  # for OpenMP Fortran routines
+```
+
+Further installation instructions and options can be found in the [web documentation](https://shtools.github.io/SHTOOLS/).
+
+### CONTRIBUTING
+
+We work on the `develop` branch and only push releases to `master`. Please base all pull requests on `develop`.
+
+### CONTRIBUTORS
+
+For the full list of contributors, see the [AUTHORS](./AUTHORS.md) file.
+
+### LICENSE
+This project uses the BSD 3-Clause license, as found in the [LICENSE](./LICENSE.txt) file.
+
+### REFERENCES
+- Mark A. Wieczorek and Matthias Meschede (2018). SHTools --- Tools for working with spherical harmonics, *Geochemistry, Geophysics, Geosystems*, 19, 2574-2592, doi:[10.1029/2018GC007529](https://doi.org/10.1029/2018GC007529).
+- Mark Wieczorek, *et al*. (2019). SHTOOLS/SHTOOLS. Zenodo, doi:[10.5281/zenodo.3457861](https://doi.org/10.5281/zenodo.3457861)

@@ -1,0 +1,14 @@
+--- PCA Log Started: 2026-04-05 22:00:02.073448 ---
+Output: D:\capstone\HFH Hippocampus Segmentation_Organized\ICP\output_2_Patients_With_Labels
+
+[22:00:02] ============================================================
+[22:00:02] --- SlicerSALT PCA ANALYSIS ---
+[22:00:02] ============================================================
+[22:00:02] Verified 15 subjects.
+[22:00:02] Executing ShapePCA module... Please wait (Check this log for %)
+[22:00:02]   Calculation Progress: 0%
+[22:00:05] --- Computation SUCCESS! Extracting scores to CSV ---
+[22:00:05] DONE: 15 subjects exported to D:\capstone\HFH Hippocampus Segmentation_Organized\ICP\output_2_Patients_With_Labels\pca_results\pca_scores.csv
+[22:00:05] ============================================================
+[22:00:05] PCA ANALYSIS COMPLETED!
+[22:00:05] ============================================================
