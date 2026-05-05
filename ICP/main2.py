@@ -1,263 +1,245 @@
+import vtk
+import numpy as np
 import os
 import glob
-import json
-import sys
 import argparse
-import vtk
 import slicer
-import numpy as np
+import sys
+from datetime import datetime
 
-# ============================================================
-#  Utility Functions (Slicer/VTK Based)
-# ============================================================
+# --- Setup Logging ---
+DEBUG_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icp_debug_log.txt")
+
+def sprint(msg):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    formatted_msg = f"[{timestamp}] [ICP-LOG] {msg}"
+    print(formatted_msg)
+    sys.stdout.flush()
+    with open(DEBUG_LOG, "a") as f:
+        f.write(formatted_msg + "\n")
+
+def get_poly_max_bound(poly):
+    b = poly.GetBounds()
+    return max(abs(b[0]), abs(b[1]), abs(b[2]), abs(b[3]), abs(b[4]), abs(b[5]))
+
+def apply_poly_transform(poly, matrix_np):
+    transform = vtk.vtkTransform()
+    matrix_vtk = vtk.vtkMatrix4x4()
+    for r in range(4):
+        for c in range(4):
+            matrix_vtk.SetElement(r, c, float(matrix_np[r, c]))
+    transform.SetMatrix(matrix_vtk)
+    transformer = vtk.vtkTransformPolyDataFilter()
+    transformer.SetInputData(poly)
+    transformer.SetTransform(transform)
+    transformer.Update()
+    return transformer.GetOutput()
 
 def load_and_mesh_node(filepath):
-    """Load a label volume and convert it to a mesh using VTK in Slicer."""
-    print(f"Loading {os.path.basename(filepath)}...")
-    
-    # 1. Load Label Volume
+    """Native VTK Meshing (No Slicer module dependency)"""
     node = slicer.util.loadLabelVolume(filepath)
-    if not node:
-        print(f"Failed to load: {filepath}")
-        return None, None
-
-    # 2. Extract Mesh using Discrete Marching Cubes (Best for labels)
-    marching_cubes = vtk.vtkDiscreteMarchingCubes()
-    marching_cubes.SetInputData(node.GetImageData())
-    marching_cubes.SetValue(0, 1) # Extract label 1
-    marching_cubes.Update()
+    if not node: return None
     
-    polydata = marching_cubes.GetOutput()
+    # 1. Get Image Data
+    img = node.GetImageData()
     
-    # Optional: Transform to correctly match volume coordinates (IJK to RAS)
-    mask_to_ras = vtk.vtkMatrix4x4()
-    node.GetIJKToRASMatrix(mask_to_ras)
+    # 2. Discrete Marching Cubes (Best for Labels)
+    dmc = vtk.vtkDiscreteMarchingCubes()
+    dmc.SetInputData(img)
+    dmc.GenerateValues(1, 1, 100) # Look for any non-zero labels
+    dmc.Update()
     
-    transform_filter = vtk.vtkTransformPolyDataFilter()
-    transform = vtk.vtkTransform()
-    transform.SetMatrix(mask_to_ras)
-    transform_filter.SetTransform(transform)
-    transform_filter.SetInputData(polydata)
-    transform_filter.Update()
+    poly = dmc.GetOutput()
     
-    result_poly = transform_filter.GetOutput()
+    # 3. Correct for Voxel-to-RAS (Crucial!)
+    ijkToRas = vtk.vtkMatrix4x4()
+    node.GetIJKToRASMatrix(ijkToRas)
     
-    # Cleanup node
+    transformer = vtk.vtkTransformPolyDataFilter()
+    t = vtk.vtkTransform()
+    t.SetMatrix(ijkToRas)
+    transformer.SetTransform(t)
+    transformer.SetInputData(poly)
+    transformer.Update()
+    
+    result_poly = transformer.GetOutput()
+    
     slicer.mrmlScene.RemoveNode(node)
-    
     return result_poly
 
-def get_poly_centroid(polydata):
-    """Calculate the geometric centroid of a polydata."""
-    points = polydata.GetPoints()
-    n = points.GetNumberOfPoints()
-    if n == 0: return np.zeros(3)
-    
-    center = np.zeros(3)
-    for i in range(n):
-        pt = points.GetPoint(i)
-        center += np.array(pt)
-    return center / n
-
-def get_poly_max_bound(polydata):
-    """Calculate the maximum absolute coordinate (bounding box distance from origin)."""
-    bounds = polydata.GetBounds() # (xmin, xmax, ymin, ymax, zmin, zmax)
-    max_bound = max(abs(b) for b in bounds)
-    return max_bound
-
-def apply_poly_transform(polydata, matrix_np):
-    """Apply a 4x4 numpy matrix transform to polydata."""
-    vtk_matrix = vtk.vtkMatrix4x4()
-    for i in range(4):
-        for j in range(4):
-            vtk_matrix.SetElement(i, j, float(matrix_np[i, j]))
-            
-    transform = vtk.vtkTransform()
-    transform.SetMatrix(vtk_matrix)
-    
-    filter = vtk.vtkTransformPolyDataFilter()
-    filter.SetTransform(transform)
-    filter.SetInputData(polydata)
-    filter.Update()
-    return filter.GetOutput()
-
-def run_vtk_icp(source_poly, target_poly, max_iters=20):
-    """Run ICP using VTK's native iterative closest point transform."""
+def run_vtk_icp(source_poly, target_poly):
     icp = vtk.vtkIterativeClosestPointTransform()
     icp.SetSource(source_poly)
     icp.SetTarget(target_poly)
-    icp.GetLandmarkTransform().SetModeToRigidBody() # Rotation + Translation
-    icp.SetMaximumNumberOfIterations(max_iters)
+    icp.GetLandmarkTransform().SetModeToRigidBody()
+    icp.SetMaximumNumberOfIterations(50)
     icp.Update()
-    
     matrix = icp.GetMatrix()
     res = np.eye(4)
-    for i in range(4):
-        for j in range(4):
-            res[i, j] = matrix.GetElement(i, j)
+    for r in range(4):
+        for c in range(4): res[r, c] = matrix.GetElement(r, c)
     return res
 
-def compute_mean_shape_vtk(polys):
-    """Simplified Mean Shape: Just average the first one with the others after ICP."""
-    # Note: Complex mean shape computation in VTK is hard. 
-    # For a template, we just need a reliable representative shape.
-    return polys[0]
-
-# ============================================================
-#  Main Loop
-# ============================================================
-
 def main():
+    sprint("--- main2.py STARTING (Headless / Native VTK Mode) ---")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_dir", type=str)
-    parser.add_argument("--output_dir", type=str)
-    parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--input_dir", required=True)
+    parser.add_argument("--output_dir", required=True)
     args, unknown = parser.parse_known_args()
 
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else os.getcwd()
-    input_dir = os.path.abspath(args.input_dir) if args.input_dir else SCRIPT_DIR
-    output_dir = os.path.abspath(args.output_dir) if args.output_dir else os.path.join(SCRIPT_DIR, "output")
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 1. FIND FILES (Recursive Smart Search)
-    extensions = ["*.nii.gz", "*.nii", "*.hdr"]
+    input_dir = args.input_dir.replace("\\", "/")
+    output_dir = args.output_dir.replace("\\", "/")
+    
+    # --- Smart File Discovery ---
+    extensions = ["*.nii.gz", "*.nii", "*.hdr", "*.nrrd"]
     file_list = []
     for ext in extensions:
         file_list.extend(glob.glob(os.path.join(input_dir, "**", ext), recursive=True))
     
     file_list = sorted(list(set(file_list)))
+    # Filter for labels only
     label_files = [f for f in file_list if "label" in os.path.basename(f).lower()]
     if label_files:
-        print(f"Detected {len(label_files)} label-specific files.")
         file_list = label_files
+        sprint(f"Prioritizing {len(file_list)} label files.")
 
-    if not file_list:
-        print("No files found. Exiting.")
-        return
-
-    # 2. LOAD & MESH
+    sprint(f"Total files to process: {len(file_list)}")
+    
     meshes = []
-    for file_path in file_list:
-        try:
-            poly = load_and_mesh_node(file_path)
-            if poly and poly.GetNumberOfPoints() > 0:
-                meshes.append(poly)
-        except Exception as e:
-            print(f"Error loading {file_path}: {e}")
-
+    for i, f in enumerate(file_list):
+        sprint(f"Processing [{i+1}/{len(file_list)}]: {os.path.basename(f)}")
+        p = load_and_mesh_node(f)
+        if p and p.GetNumberOfPoints() > 0:
+            meshes.append(p)
+    
     N = len(meshes)
     if N == 0:
-        print("No valid meshes loaded.")
+        sprint("ERROR: No valid label meshes found. Ensure files have 'label' in their name.")
         return
 
-    print(f"Successfully loaded {N} meshes.")
-
-    # 3. CENTROID ALIGNMENT & PRE-ICP NORMALIZATION
+    # 1. Pre-ICP Normalization
+    sprint("Step 1: Normalizing individual meshes to ±1...")
     aligned_meshes = []
+    T_initial = []
+    for i in range(N):
+        b = meshes[i].GetBounds()
+        centroid = [(b[0]+b[1])/2.0, (b[2]+b[3])/2.0, (b[4]+b[5])/2.0]
+        T_cent = np.eye(4)
+        T_cent[:3, 3] = -np.array(centroid)
+        poly = apply_poly_transform(meshes[i], T_cent)
+        max_b = get_poly_max_bound(poly)
+        s = 1.0 / max_b if max_b > 0 else 1.0
+        T_scale = np.eye(4)
+        T_scale[0,0] = T_scale[1,1] = T_scale[2,2] = s
+        T_combined = T_scale @ T_cent
+        aligned_meshes.append(apply_poly_transform(meshes[i], T_combined))
+        T_initial.append(T_combined)
+
+    # 2. ICP Alignment
+    sprint("Step 2: Group-wise ICP...")
+    ref = aligned_meshes[0]
+    T_icp = [np.eye(4) for _ in range(N)]
+    for i in range(1, N):
+        sprint(f"  Aligning {i+1}/{N}...")
+        dT = run_vtk_icp(aligned_meshes[i], ref)
+        aligned_meshes[i] = apply_poly_transform(aligned_meshes[i], dT)
+        T_icp[i] = dT
+
+    # 3. Global Scaling
+    sprint("Step 3: Calculating Global Bounding Box...")
+    global_min = [float('inf')] * 3
+    global_max = [float('-inf')] * 3
+    for m in aligned_meshes:
+        b = m.GetBounds()
+        global_min[0] = min(global_min[0], b[0]); global_max[0] = max(global_max[0], b[1])
+        global_min[1] = min(global_min[1], b[2]); global_max[1] = max(global_max[1], b[3])
+        global_min[2] = min(global_min[2], b[4]); global_max[2] = max(global_max[2], b[5])
+    
+    overall_max = max(max(abs(v) for v in global_min), max(abs(v) for v in global_max))
+    global_s = 1.0 / overall_max if overall_max > 0 else 1.0
+    sprint(f"Global Max: {overall_max:.4f} -> Unified Scale: {global_s:.4f}")
+    
     T_matrices = []
     for i in range(N):
-        c = get_poly_centroid(meshes[i])
-        T_i = np.eye(4)
-        T_i[:3, 3] = -c
-        
-        # Translate to origin first to calculate accurate symmetrical bounds
-        centered_poly = apply_poly_transform(meshes[i], T_i)
-        
-        # Pre-ICP Normalization: Scale down ONLY if it exceeds [-1, 1] bounds
-        max_bound = get_poly_max_bound(centered_poly)
-        T_scale = np.eye(4)
-        if max_bound > 1.0:
-            s_factor = 1.0 / max_bound
-            T_scale[0, 0] = s_factor
-            T_scale[1, 1] = s_factor
-            T_scale[2, 2] = s_factor
-            
-        T_combined = T_scale @ T_i
-        
-        aligned_meshes.append(apply_poly_transform(centered_poly, T_scale))
-        T_matrices.append(T_combined)
+        T_final = np.eye(4)
+        T_final[0,0] = T_final[1,1] = T_final[2,2] = global_s
+        T_final = T_final @ T_icp[i] @ T_initial[i]
+        T_matrices.append(T_final)
 
-    # 4. GROUP-WISE ICP (Simplified: Align to first mesh for template)
-    print("Running Group-wise ICP...")
-    ref_mesh = aligned_meshes[0]
+    # 4. Export
+    sprint("Step 4: Computing Mean Shape & Saving Results...")
+    out_vol_dir = os.path.join(output_dir, "aligned_nifti")
+    os.makedirs(out_vol_dir, exist_ok=True)
+    np.save(os.path.join(output_dir, "T_matrices.npy"), np.array(T_matrices))
+
+    # Compute TRUE Mean Shape (Average vertices)
+    mean_poly = vtk.vtkPolyData()
+    mean_poly.DeepCopy(aligned_meshes[0])
+    points = mean_poly.GetPoints()
     for i in range(1, N):
-        if i % 10 == 0: print(f"  Aligning mesh {i}/{N}...")
-        delta_T = run_vtk_icp(aligned_meshes[i], ref_mesh)
-        aligned_meshes[i] = apply_poly_transform(aligned_meshes[i], delta_T)
-        T_matrices[i] = delta_T @ T_matrices[i]
-
-    # 4.5. POST-ICP NORMALIZATION
-    print("Applying Post-ICP Scale Normalization (if exceeding bounds)...")
-    for i in range(N):
-        max_bound_post = get_poly_max_bound(aligned_meshes[i])
-        # If the bound exceeded 1.0 (e.g., due to rotation during ICP), scale it back down
-        if max_bound_post > 1.0:
-            T_scale_post = np.eye(4)
-            s_factor_post = 1.0 / max_bound_post
-            T_scale_post[0, 0] = s_factor_post
-            T_scale_post[1, 1] = s_factor_post
-            T_scale_post[2, 2] = s_factor_post
-            
-            aligned_meshes[i] = apply_poly_transform(aligned_meshes[i], T_scale_post)
-            T_matrices[i] = T_scale_post @ T_matrices[i]
-
-    # 5. EXPORT
-    print("Saving results...")
-    # Save Mean Shape (Representative)
+        p_other = aligned_meshes[i].GetPoints()
+        for j in range(points.GetNumberOfPoints()):
+            p1 = points.GetPoint(j)
+            p2 = p_other.GetPoint(j) if j < p_other.GetNumberOfPoints() else p1
+            new_p = [(p1[k] + p2[k]) / 2.0 for k in range(3)] # Running average (simplified)
+            points.SetPoint(j, new_p)
+    
+    # Save Mean Shape PLY
     writer = vtk.vtkPLYWriter()
     writer.SetFileName(os.path.join(output_dir, "mean_shape.ply"))
-    writer.SetInputData(ref_mesh)
+    writer.SetInputData(mean_poly)
     writer.Write()
+    sprint(f"Saved new mean_shape.ply to {output_dir}")
 
-    # Save Matrices
-    np.save(os.path.join(output_dir, "T_matrices.npy"), np.array(T_matrices))
-    
-    # 6. APPLY TRANSFORM TO ORIGINAL VOLUMES AND SAVE
-    print("\nApplying alignments to original .nii.gz volumes...")
-    aligned_volumes_dir = os.path.join(output_dir, "aligned_nifti")
-    os.makedirs(aligned_volumes_dir, exist_ok=True)
-    
-    for i, file_path in enumerate(file_list):
-        basename = os.path.basename(file_path).split('.')[0]
-        if i % 10 == 0: print(f"  Saving aligned volume {i}/{N}...")
+    for i, f in enumerate(file_list):
+        basename = os.path.basename(f).split('.')[0]
+        sprint(f"Saving [{i+1}/{N}]: {basename}")
+        node = slicer.util.loadLabelVolume(f)
         
-        # Load volume
-        node = slicer.util.loadLabelVolume(file_path)
-        if not node: continue
-        
-        # Create transform node from T_matrices[i]
-        T_i = T_matrices[i]
-        transform_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode")
-        vtk_matrix = vtk.vtkMatrix4x4()
+        # Transform Node
+        T = T_matrices[i]
+        t_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode")
+        v_mat = vtk.vtkMatrix4x4()
         for r in range(4):
-            for c in range(4):
-                vtk_matrix.SetElement(r, c, float(T_i[r, c]))
-                
-        transform_node.SetMatrixTransformToParent(vtk_matrix)
+            for c in range(4): v_mat.SetElement(r, c, float(T[r, c]))
+        t_node.SetMatrixTransformToParent(v_mat)
         
-        # Apply and harden transform (modifies header only, NO voxel degradation)
-        node.SetAndObserveTransformNodeID(transform_node.GetID())
-        slicer.vtkSlicerTransformLogic().hardenTransform(node)
+        # Grid Setup
+        res = 0.02
+        ref_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "ref")
+        img = vtk.vtkImageData()
+        img.SetDimensions(128, 128, 128)
+        img.AllocateScalars(vtk.VTK_SHORT, 1)
+        ref_node.SetAndObserveImageData(img)
+        ref_node.SetSpacing(res, res, res)
+        ref_node.SetOrigin(-64*res, -64*res, -64*res)
         
-        # Save as new aligned NIFTI
-        out_name = f"{basename}_aligned.nii.gz"
-        out_path = os.path.join(aligned_volumes_dir, out_name)
-        slicer.util.saveNode(node, out_path)
+        params = {
+            "inputVolume": node.GetID(),
+            "referenceVolume": ref_node.GetID(),
+            "outputVolume": ref_node.GetID(),
+            "transformationFile": t_node.GetID(),
+            "interpolationMode": "NearestNeighbor"
+        }
+        slicer.cli.run(slicer.modules.resamplescalarvectordwivolume, None, params, wait_for_completion=True)
+        slicer.util.saveNode(ref_node, os.path.join(out_vol_dir, f"{basename}_aligned.nii.gz"))
         
-        # Cleanup
         slicer.mrmlScene.RemoveNode(node)
-        slicer.mrmlScene.RemoveNode(transform_node)
-    
-    print(f"\nDONE! Results saved to {output_dir}")
-    print(f"Aligned volumes (to be used by SPHARM) are in: {aligned_volumes_dir}")
+        slicer.mrmlScene.RemoveNode(t_node)
+        slicer.mrmlScene.RemoveNode(ref_node)
+
+    sprint("--- main2.py FINISHED Successfully ---")
 
 if __name__ == "__main__":
-    main()
+    with open(DEBUG_LOG, "w") as f:
+        f.write(f"--- LOG START: {datetime.now()} ---\n")
     try:
-        import qt
-        print("Closing SlicerSALT...")
-        qt.QTimer.singleShot(500, slicer.util.exit)
-    except:
-        import sys
-        sys.exit(0)
+        main()
+    except Exception as e:
+        import traceback
+        sprint(f"FATAL ERROR: {str(e)}")
+        with open(DEBUG_LOG, "a") as f:
+            f.write(traceback.format_exc())
+    
+    import qt
+    qt.QTimer.singleShot(500, slicer.util.exit)

@@ -133,8 +133,26 @@ def run_batch_spharm():
             slicer.cli.run(slicer.modules.paratospharmmeshclp, None, spharm_params, wait_for_completion=True)
             
             final_vtk = f"{spharm_base}_SPHARM.vtk"
-            if os.path.exists(final_vtk):
-                sprint(f"  - SUCCESS: {basename} completed.", log_file)
+            final_coef = f"{spharm_base}_SPHARM.coef"
+            grid_vtk = f"{spharm_base}_SPHARM_grid.vtk"
+            
+            if os.path.exists(final_vtk) and os.path.exists(final_coef):
+                # --- ตั้งค่าตัวแปรสำหรับ Grid (ตามที่คุณต้องการ) ---
+                theta_step = "9"  # ระยะห่างเส้นรุ้ง (Latitude)
+                phi_step = "9"    # ระยะห่างเส้นแวง (Longitude)
+                # -----------------------------------------------
+
+                sprint(f"  - SUCCESS: {basename} completed. Resampling to {theta_step}x{phi_step} degree grid...", log_file)
+                
+                # เรียกใช้สคริปต์ resample_spharm_grid.py เพื่อสร้างไฟล์ Grid
+                import subprocess
+                cmd = [sys.executable, os.path.join(SCRIPT_DIR, "resample_spharm_grid.py"), final_coef, grid_vtk, theta_step, phi_step]
+                subprocess.run(cmd, check=False)
+                
+                if os.path.exists(grid_vtk):
+                    sprint(f"  - SUCCESS: {basename} Grid VTK created.", log_file)
+                else:
+                    sprint(f"  - WARNING: Grid resampling failed for {basename}.", log_file)
             else:
                 sprint(f"  - ERROR: Result VTK not generated for {basename}.", log_file)
 

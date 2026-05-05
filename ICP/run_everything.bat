@@ -36,7 +36,7 @@ echo.
 :: Step 1: ICP & Mean Shape
 title Pipeline [1/5]: ICP Alignment (%FOLDER_NAME%)
 echo [1/5] Running Group-wise ICP Alignment (main2.py)...
-"%SLICER_EXE%" --no-main-window --python-script main2.py --headless --input_dir "%INPUT_DIR%" --output_dir "%OUTPUT_DIR%"
+"%SLICER_EXE%" --no-main-window --no-splash --python-script main2.py --input_dir "%INPUT_DIR%" --output_dir "%OUTPUT_DIR%"
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo [ERROR] Step 1 failed.
