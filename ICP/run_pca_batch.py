@@ -1,12 +1,57 @@
 import os
+import sys
+
+# =============================================================================
+# BOOTSTRAP: ถ้ารันด้วย Python ปกติ -> re-launch ผ่าน SlicerSALT
+# (slicer module อยู่ใน SlicerSALT เท่านั้น)
+# =============================================================================
+
+def _bootstrap_slicer():
+    try:
+        import slicer  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    slicer_exe = os.environ.get(
+        "SLICER_EXE",
+        r"C:\Program Files\SlicerSALT 6.0.0\SlicerSALT.exe",
+    )
+    if not os.path.exists(slicer_exe):
+        print(f"[ERROR] SlicerSALT not found at: {slicer_exe}")
+        print("        Set env var SLICER_EXE or edit the default path.")
+        sys.exit(1)
+
+    import subprocess
+    script_path = os.path.abspath(__file__)
+    cmd = [slicer_exe, "--no-main-window", "--no-splash",
+           "--python-script", script_path] + sys.argv[1:]
+    print(f"[INFO] No 'slicer' module here. Re-launching via SlicerSALT:")
+    print(f"       {slicer_exe}")
+    sys.exit(subprocess.call(cmd))
+
+
+_bootstrap_slicer()
+
+
+# =============================================================================
+# ใน SlicerSALT แล้ว -> import เต็มได้
+# =============================================================================
+
 import glob
 import csv
 import slicer
 import time
 import json
-import sys
 import argparse
 from datetime import datetime
+
+
+def prompt_folder(title):
+    """เปิด QFileDialog ให้ user เลือก folder (Qt ที่ฝังใน SlicerSALT)"""
+    import qt
+    folder = qt.QFileDialog.getExistingDirectory(None, title)
+    return folder if folder else None
 
 # --- Utility Functions ---
 def sprint(msg, log_file):
@@ -19,7 +64,9 @@ def sprint(msg, log_file):
 def run_pca_analysis():
     # --- Configuration via Argparse ---
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", type=str, help="Directory to save all results")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Directory containing spharm_results/ (output ของ main2.py). "
+                             "ถ้าไม่ระบุ จะเด้ง folder picker ให้เลือก")
     args, unknown = parser.parse_known_args()
 
     try:
@@ -30,7 +77,19 @@ def run_pca_analysis():
     if args.output_dir:
         output_root = os.path.abspath(args.output_dir)
     else:
-        output_root = os.path.join(SCRIPT_DIR, "output")
+        print("No --output_dir given. Opening folder picker...")
+        chosen = prompt_folder(
+            "Select output folder (มี spharm_results/ อยู่ข้างใน — เช่น output_left_hippocampus)"
+        )
+        if not chosen:
+            print("ERROR: No folder selected. Exiting.")
+            return
+        # รองรับกรณี user เลือก spharm_results โดยตรง
+        if os.path.basename(chosen.rstrip("\\/")) == "spharm_results":
+            output_root = os.path.abspath(os.path.dirname(chosen))
+        else:
+            output_root = os.path.abspath(chosen)
+        print(f"Output root: {output_root}")
 
     pca_output_dir = os.path.join(output_root, "pca_results")
     if not os.path.exists(pca_output_dir):
@@ -57,12 +116,19 @@ def run_pca_analysis():
         except: pass
 
     # 2. FIND VTK FILES
-    vtk_files = sorted(glob.glob(os.path.join(results_dir, "*_SPHARM_ellalign.vtk")))
+    vtk_files = sorted(glob.glob(os.path.join(results_dir, "*_SPHARM_pca_ready.vtk")))
     if not vtk_files:
+        vtk_files = sorted(glob.glob(os.path.join(results_dir, "*_SPHARM_realigned.vtk")))
+    if not vtk_files:
+        vtk_files = sorted(glob.glob(os.path.join(results_dir, "*_SPHARM_procalign.vtk")))
+    if not vtk_files:
+        vtk_files = sorted(glob.glob(os.path.join(results_dir, "*_SPHARM_ellalign.vtk")))
+    
+    if vtk_files:
+        sprint(f"Using {len(vtk_files)} meshes: {os.path.basename(vtk_files[0])}", log_file)
+    else:
         sprint(f"ERROR: No aligned VTK files found in {results_dir}", log_file)
         return
-
-    sprint(f"Verified {len(vtk_files)} subjects.", log_file)
 
     # 3. CREATE INPUT CSV
     csv_input_path = os.path.join(pca_output_dir, "pca_input.csv")
@@ -73,12 +139,16 @@ def run_pca_analysis():
             writer.writerow([vtk_file.replace("\\", "/"), 0])
 
     # 4. RUN PCA MODULE
+    # shapeNum ต้องไม่เกิน (N - 1) — PCA produce ได้สูงสุด min(N-1, features) modes
+    # ถ้า hardcode 50 แต่มี subject < 50 จะ overspec และอาจ error / warning จาก SlicerSALT
     save_json = os.path.join(pca_output_dir, "pca_model.json")
+    shape_num = max(1, min(50, len(vtk_files) - 1))
+    sprint(f"Using shapeNum = {shape_num} (from {len(vtk_files)} subjects)", log_file)
     parameters = {
         'inputCsv': csv_input_path,
         'outputJson': save_json,
         'evaluation': 0,
-        'shapeNum': 50
+        'shapeNum': shape_num
     }
 
     sprint("Executing ShapePCA module... Please wait (Check this log for %)", log_file)
@@ -118,7 +188,9 @@ def run_pca_analysis():
                     header = ["Subject"] + [f"PC{i+1}" for i in range(len(scores[0]))]
                     writer.writerow(header)
                     for i in range(min(len(scores), len(vtk_files))):
-                        subject_id = os.path.basename(vtk_files[i]).replace("_SPHARM_ellalign.vtk", "")
+                        subject_id = os.path.basename(vtk_files[i])
+                        for suf in ("_SPHARM_realigned.vtk", "_SPHARM_ellalign.vtk"):
+                            subject_id = subject_id.replace(suf, "")
                         row = [subject_id] + ["{:.8f}".format(s) for s in scores[i]]
                         writer.writerow(row)
                 sprint(f"DONE: {len(scores)} subjects exported to {output_csv}", log_file)
@@ -134,11 +206,33 @@ def run_pca_analysis():
         sprint(f"Error Detail: {cli_node.GetErrorText()}", log_file)
 
 if __name__ == "__main__":
-    run_pca_analysis()
+    # ทำไม os._exit forced: --no-main-window mode บางครั้ง Qt event loop ไม่ start
+    #   -> slicer.util.exit() ที่ใช้ QTimer ไม่ trigger -> Slicer process ค้าง
+    #   -> batch script รอ exit ไม่จบ (ดูเหมือน Slicer "เด้ง")
+    #   forced os._exit() = kill process ทันที, รับประกัน batch ไปต่อได้
+    import sys, os
+    exit_code = 0
     try:
-        import qt
-        print("Closing SlicerSALT...")
-        qt.QTimer.singleShot(500, slicer.util.exit)
-    except:
-        import sys
-        sys.exit(0)
+        run_pca_analysis()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        exit_code = 1
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            slicer.util.exit(exit_code)
+        except Exception:
+            pass
+        try:
+            import time, threading
+            def _force_kill():
+                time.sleep(1.5)
+                os._exit(exit_code)
+            threading.Thread(target=_force_kill, daemon=True).start()
+        except Exception:
+            os._exit(exit_code)
