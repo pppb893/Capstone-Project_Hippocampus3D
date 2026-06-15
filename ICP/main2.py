@@ -571,29 +571,34 @@ def main():
         total_d = sum(icp_distance(aligned_meshes[i], ref_mean) for i in range(N))
         sprint(f"  [Round {gw_iter+1}] Mean ICP dist to template: {total_d/N:.6f}")
 
-    # ----------------------------------------------------------------
-    # STEP 5: GLOBAL bounding-box normalization
-    # หา union bounding box ของทุก mesh หลัง ICP
-    # แล้วใช้ค่า min/max "เดียวกัน" normalize ทุก mesh
-    # -> รักษา relative size ภายในกลุ่ม (subject ใหญ่ก็ยังใหญ่กว่า subject เล็ก)
-    #    แต่ทั้งกลุ่มถูกย่อ/ขยายเข้าหา [-1, 1] พร้อมกัน
-    # -> ทำให้ PC1 ของ shape PCA จับ "shape variation" ไม่ใช่ "size variation"
-    # ----------------------------------------------------------------
-    sprint("Step 5: Global bounding-box normalization (union of all aligned meshes)...")
+    sprint("Step 5: Global bounding-box normalization (preserving relative physical sizes)...")
+    
+    # 1. Scale each aligned mesh back to its original physical size
+    physical_aligned_meshes = []
+    T_scale_back_list = []
+    for i in range(N):
+        s = T_initial[i][0, 0]
+        T_scale_back = np.eye(4)
+        T_scale_back[0, 0] = T_scale_back[1, 1] = T_scale_back[2, 2] = 1.0 / s
+        T_scale_back_list.append(T_scale_back)
+        m_phys = apply_poly_transform(aligned_meshes[i], T_scale_back)
+        physical_aligned_meshes.append(m_phys)
+
+    # 2. Find union bounding box of all physical aligned meshes
     g_min = np.array([float('inf')] * 3)
     g_max = np.array([float('-inf')] * 3)
-    for m in aligned_meshes:
+    for m in physical_aligned_meshes:
         b = m.GetBounds()
         g_min[0] = min(g_min[0], b[0]); g_max[0] = max(g_max[0], b[1])
         g_min[1] = min(g_min[1], b[2]); g_max[1] = max(g_max[1], b[3])
         g_min[2] = min(g_min[2], b[4]); g_max[2] = max(g_max[2], b[5])
-    sprint(f"  Union bounds (before): "
+        
+    sprint(f"  Physical Union bounds: "
            f"X[{g_min[0]:+.4f},{g_max[0]:+.4f}]  "
            f"Y[{g_min[1]:+.4f},{g_max[1]:+.4f}]  "
            f"Z[{g_min[2]:+.4f},{g_max[2]:+.4f}]")
 
-    # center on (g_min + g_max)/2, scale uniformly ด้วย max half-extent
-    # uniform scale = รักษา aspect ratio
+    # 3. Center on union, scale uniformly with max half-extent
     g_center = (g_min + g_max) / 2.0
     g_half = (g_max - g_min) / 2.0
     max_half = float(g_half.max())
@@ -606,10 +611,11 @@ def main():
     T_global = T_g_scale @ T_g_cent
     sprint(f"  Global center = ({g_center[0]:+.4f}, {g_center[1]:+.4f}, {g_center[2]:+.4f})")
     sprint(f"  Global scale  = {global_scale:.6f}  "
-           f"(max half-extent {max_half:.4f} -> 1.0)")
+           f"(max physical half-extent {max_half:.4f} -> 1.0)")
 
+    # 4. Apply T_global to the physical aligned meshes
     for i in range(N):
-        aligned_meshes[i] = apply_poly_transform(aligned_meshes[i], T_global)
+        aligned_meshes[i] = apply_poly_transform(physical_aligned_meshes[i], T_global)
 
     # verify post-normalize
     v_min = np.array([float('inf')] * 3)
@@ -624,8 +630,8 @@ def main():
            f"Y[{v_min[1]:+.4f},{v_max[1]:+.4f}]  "
            f"Z[{v_min[2]:+.4f},{v_max[2]:+.4f}]")
 
-    # final transform chain: global @ icp @ initial
-    T_matrices = [T_global @ T_icp[i] @ T_initial[i] for i in range(N)]
+    # final transform chain: global @ scale_back @ icp @ initial
+    T_matrices = [T_global @ T_scale_back_list[i] @ T_icp[i] @ T_initial[i] for i in range(N)]
 
     # ----------------------------------------------------------------
     # STEP 6: Save results

@@ -345,21 +345,25 @@ class SpharmMeshViewer:
             (1.0,  1.0,  0.3),   # med   - yellow
         ]
         
-        # Determine fixed vertex indices from the mean shape to ensure correspondence visualization
-        use_fixed_indices = (self.source == "pca_ready" and self.mean_poly is not None)
+        # Determine fixed vertex indices from the template shape to ensure correspondence visualization
+        use_fixed_indices = (self.source in ("pca_ready", "realigned", "procalign") or "procalign" in self.source)
         fixed_indices = None
-        if use_fixed_indices:
-            mean_pts = poly_points_numpy(self.mean_poly)
+        if use_fixed_indices and len(self.meshes) > 0:
+            ref_pts = poly_points_numpy(self.meshes[0])
             try:
-                fixed_indices = find_anatomical_landmarks(mean_pts)
+                # First try positional detection since it's aligned
+                fixed_indices = find_landmarks_by_position(ref_pts)
             except Exception:
-                use_fixed_indices = False
+                try:
+                    fixed_indices = find_anatomical_landmarks(ref_pts)
+                except Exception:
+                    use_fixed_indices = False
 
         use_positional = self.source == "realigned"
         for poly in self.meshes:
             pts = poly_points_numpy(poly)
             try:
-                if use_fixed_indices:
+                if use_fixed_indices and fixed_indices is not None:
                     h, t, l, m = fixed_indices
                 elif use_positional:
                     h, t, l, m = find_landmarks_by_position(pts)

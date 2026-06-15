@@ -271,41 +271,68 @@ def main():
         print(f"[ERROR] Not a folder: {folder}")
         sys.exit(1)
 
+    # Clean up old realigned/pca_ready files to prevent mixing stale results from previous runs
+    old_aligned_files = (glob.glob(os.path.join(folder, "*_SPHARM_realigned.vtk")) +
+                         glob.glob(os.path.join(folder, "*_SPHARM_pca_ready.vtk")))
+    if old_aligned_files:
+        print(f"Cleaning up {len(old_aligned_files)} old realigned/pca_ready files...")
+        for f in old_aligned_files:
+            try:
+                os.remove(f)
+            except Exception as e:
+                print(f"  Failed to delete {os.path.basename(f)}: {e}")
+
     # ลำดับ preference (สูง -> ต่ำ):
     #   1. *_SPHARM_procalign.vtk   (template-aligned; consistent correspondences ระหว่าง
     #                                subjects -> PCA สะอาด)
-    #   2. *_SPHARM_ellalign.vtk    (ellipsoid-aligned; correspondences ตรงกันใน "subject เดียว"
+    #   2. *_SPHARM.vtk            (raw SlicerSALT output; should have template alignment)
+    #   3. *_SPHARM_ellalign.vtk    (ellipsoid-aligned; correspondences ตรงกันใน "subject เดียว"
     #                                แต่ระหว่าง subjects มี sign-flip ambiguity)
-    #   3. *_SPHARM.vtk            (raw; parameterization ของแต่ละ subject ต่างกัน)
-    # procalign ต้องการรัน SPHARM-PDM ด้วย --reference_template (deep fix)
-    # ถ้ามี procalign สำหรับ "ทุก" subject -> ใช้ procalign (correspondences สะอาดที่สุด)
-    files = sorted(glob.glob(os.path.join(folder, "*_SPHARM_procalign.vtk")))
-    source = ""
-    if files and len(files) > 0:
-        ellalign_count = len(glob.glob(os.path.join(folder, "*_SPHARM_ellalign.vtk")))
-        if len(files) >= ellalign_count and ellalign_count > 0:
-            source = (f"_SPHARM_procalign.vtk (template-aligned, "
-                      f"{len(files)} subjects — recommended for PCA)")
-        else:
-            files = []
+    # ใน SlicerSALT 6.0.0 ผลลัพธ์สุดท้ายที่ผ่านการทำ Template alignment จะถูกเซฟเป็น _SPHARM.vtk
+    # ดังนั้นเราต้องโหลด _SPHARM.vtk ซึ่งมี vertex correspondence ระหว่าง subjects
+    all_spharm = sorted(glob.glob(os.path.join(folder, "*_SPHARM.vtk")))
+    candidate_files = [f for f in all_spharm
+                       if not any(s in os.path.basename(f)
+                                  for s in ("_ellalign", "_grid", "_realigned", "_procalign", "_pca_ready"))]
+    source = "_SPHARM.vtk (SlicerSALT template-aligned final output)"
 
-    # ใน SlicerSALT ผลลัพธ์สุดท้ายที่ผ่านการทำ Template alignment จะถูกเซฟเป็น _SPHARM.vtk
-    # ดังนั้นเราต้องโหลด _SPHARM.vtk แทนที่จะเป็น _ellalign.vtk
-    if not files:
-        all_spharm = sorted(glob.glob(os.path.join(folder, "*_SPHARM.vtk")))
-        files = [f for f in all_spharm
-                 if not any(s in os.path.basename(f)
-                            for s in ("_ellalign", "_grid", "_realigned", "_procalign"))]
-        source = "_SPHARM.vtk (SlicerSALT final output, should have correspondence if templates were used)"
-
-    # Fallback สุดท้ายถ้าไม่มี _SPHARM.vtk (ซึ่งเป็นไปได้ยาก)
-    if not files:
-        files = sorted(glob.glob(os.path.join(folder, "*_SPHARM_ellalign.vtk")))
+    # Fallback สุดท้ายถ้าไม่มี _SPHARM.vtk
+    if not candidate_files:
+        candidate_files = sorted(glob.glob(os.path.join(folder, "*_SPHARM_ellalign.vtk")))
         source = "_SPHARM_ellalign.vtk (WARNING: No vertex correspondence)"
 
-    if not files:
+    if not candidate_files:
         print(f"[ERROR] No SPHARM .vtk found in {folder}")
         sys.exit(1)
+
+    # Filter files: If a subject has both '_aligned' and non-aligned files, keep only the '_aligned' one.
+    filtered_files = {}
+    for f in candidate_files:
+        basename = os.path.basename(f)
+        # Strip suffix to get name
+        name = basename
+        for suffix in ("_SPHARM.vtk", "_SPHARM_ellalign.vtk"):
+            if name.endswith(suffix):
+                name = name[:-len(suffix)]
+                break
+        
+        # subject key is name with '_aligned' removed
+        if name.endswith("_aligned"):
+            subj_key = name[:-len("_aligned")]
+            is_aligned = True
+        else:
+            subj_key = name
+            is_aligned = False
+            
+        # If this subject key is not seen, or if this file is aligned while the stored one is not, keep this one
+        if subj_key not in filtered_files:
+            filtered_files[subj_key] = (f, is_aligned)
+        else:
+            stored_file, stored_is_aligned = filtered_files[subj_key]
+            if is_aligned and not stored_is_aligned:
+                filtered_files[subj_key] = (f, True)
+                
+    files = sorted([f for f, _ in filtered_files.values()])
 
     print(f"\nSource: {source}")
     print(f"Found {len(files)} meshes\n")
@@ -316,8 +343,8 @@ def main():
     print(f"  MEDIAL  -> (-1, 0, 0)  (-X 'ตก')")
     print()
 
-    # ---------- Phase 1: หา landmarks ของทุก subject ----------
-    print(f"Phase 1: Detecting anatomical landmarks per subject...")
+    # ---------- Phase 1: Load subjects and compute group mean shape ----------
+    print(f"Phase 1: Loading subjects and computing group mean shape...")
     subjects = []
     skipped = 0
     for f in files:
@@ -327,72 +354,54 @@ def main():
             skipped += 1
             continue
         pts = points_to_numpy(poly)
-        h, t, l, m = find_anatomical_landmarks(pts)
         subjects.append({
             "file": f,
             "poly": poly,
             "pts": pts,
-            "lm_indices": (h, t, l, m),
-            "lm_pts": pts[[h, t, l, m]],
         })
 
     if not subjects:
         print("[ERROR] No subjects to align.")
         return
 
-    # ---------- Phase 2: GPA + label flipping ----------
-    # แทนที่จะใช้ canonical คงที่ ใช้ consensus (mean ของ landmarks หลัง align)
-    # iterate จนกว่า mean ไม่เปลี่ยนแล้ว -> landmarks ทั้งกลุ่ม "ทับกัน"
-    # ระหว่าง iterate ลอง flip h<->t, l<->m เลือกที่ fit ดีสุด
-    # -> กันปัญหา anatomical detection พลาดในบาง subject
-    print(f"\nPhase 2: GPA + label flipping on 4 landmarks ({len(subjects)} subjects)...")
-    all_landmarks = [s["lm_pts"] for s in subjects]
-    Rs_gpa, ts_gpa, mean_lm, perms, history = gpa_landmarks(
-        all_landmarks, max_iter=30, tol=1e-7)
-    print(f"  Convergence history (||delta-mean||): "
-          f"{', '.join(f'{d:.2e}' for d in history[:10])}"
-          f"{'...' if len(history) > 10 else ''}")
-    print(f"  Converged in {len(history)} iterations.")
+    # Compute the average coordinates of all vertices across all subjects
+    # (Since SPHARM-PDM templates align meshes, vertex indices have 1-to-1 correspondence)
+    mean_pts = np.mean([s["pts"] for s in subjects], axis=0)
 
-    # นับการ flip — ดูว่ามีกี่ subject ที่ detection พลาด
-    flipped_ht = sum(1 for p in perms if p[0] != 0)
-    flipped_lm = sum(1 for p in perms if p[2] != 2)
-    print(f"  Label corrections: head/tail flipped in {flipped_ht}/{len(subjects)} subjects, "
-          f"lat/med flipped in {flipped_lm}/{len(subjects)} subjects")
+    # ---------- Phase 2: Detect landmarks on the template shape ----------
+    print(f"\nPhase 2: Detecting anatomical landmarks on the template mesh (first subject)...")
+    template_pts = subjects[0]["pts"]
+    h_idx, t_idx, l_idx, m_idx = find_anatomical_landmarks(template_pts)
+    print(f"  Detected landmark indices on template: HEAD={h_idx}, TAIL={t_idx}, LATERAL={l_idx}, MEDIAL={m_idx}")
+    mean_lm = mean_pts[[h_idx, t_idx, l_idx, m_idx]]
 
-    # apply perms to lm_indices ของแต่ละ subject (เพื่อ Phase 4 print + final spread)
-    for i, s in enumerate(subjects):
-        old_idx = list(s["lm_indices"])
-        s["lm_indices"] = tuple(old_idx[k] for k in perms[i])
-        s["lm_pts"] = s["pts"][list(s["lm_indices"])]
-
-    # ---------- Phase 3: หมุนทั้งกลุ่มไป canonical (HEAD=+Z) ----------
-    # หลัง GPA - consensus mean_lm อยู่ใน "consensus frame"
-    # หมุนทั้งกลุ่มอีกครั้งเพื่อ HEAD=+Z, TAIL=-Z, LAT=+X, MED=-X
-    print(f"\nPhase 3: Rotating group to canonical orientation (HEAD=+Z, LAT=+X)...")
+    # ---------- Phase 3: Compute single global rotation to canonical frame ----------
+    print(f"\nPhase 3: Computing single global transformation to canonical orientation...")
     size = float(np.linalg.norm(mean_lm - mean_lm.mean(axis=0), axis=1).mean())
     canonical_scaled = CANONICAL * size
+    
+    # Calculate group-wide rotation/translation mapping the mean landmarks to canonical
     R_group, t_group = kabsch_proper(mean_lm, canonical_scaled)
     print(f"  Group rotation angle: "
           f"{np.degrees(np.arccos(np.clip((np.trace(R_group)-1)/2, -1, 1))):.2f} deg")
 
-    # ---------- Phase 4: Apply landmark-based rotation ----------
-    print(f"\nPhase 4: Applying landmark-based rotation...")
+    # ---------- Phase 4: Apply global rotation to all subjects ----------
+    print(f"\nPhase 4: Applying identical global transformation to all subjects...")
     aligned_pts_list = []
-    for i, s in enumerate(subjects):
-        R_init = R_group @ Rs_gpa[i]
-        t_init = R_group @ ts_gpa[i] + t_group
-        aligned_pts_list.append((R_init @ s["pts"].T).T + t_init)
+    for s in subjects:
+        # We apply the same rigid transformation to all subjects to preserve alignment and correspondence
+        aligned_pts = (R_group @ s["pts"].T).T + t_group
+        aligned_pts_list.append(aligned_pts)
 
     # ---------- Phase 5: Write output + report ----------
     print(f"\nPhase 5: Writing output...")
-    print(f"{'Subject':<48} {'head':>5} {'tail':>5} {'lat':>5} {'med':>5} {'resid':>10}")
-    print("-" * 92)
+    print(f"{'Subject':<48} {'resid':>10}")
+    print("-" * 60)
 
     final_landmarks = []
     for i, s in enumerate(subjects):
         new_pts = aligned_pts_list[i]
-        new_lm = new_pts[list(s["lm_indices"])]
+        new_lm = new_pts[[h_idx, t_idx, l_idx, m_idx]]
         residual = float(np.linalg.norm(new_lm - canonical_scaled, axis=1).mean())
         final_landmarks.append(new_lm)
 
@@ -402,122 +411,58 @@ def main():
             if base.endswith(suf):
                 base = base[: -len(suf)]
                 break
-        out_path = base + "_SPHARM_realigned.vtk"
-        write_polydata(out_poly, out_path)
+        
+        # Save both realigned and pca_ready
+        out_path_realigned = base + "_SPHARM_realigned.vtk"
+        out_path_pca_ready = base + "_SPHARM_pca_ready.vtk"
+        write_polydata(out_poly, out_path_realigned)
+        write_polydata(out_poly, out_path_pca_ready)
 
         name = os.path.basename(s["file"])
         for suf in ("_SPHARM_procalign.vtk", "_SPHARM_ellalign.vtk", "_SPHARM.vtk"):
             name = name.replace(suf, "")
-        h, t, l, m = s["lm_indices"]
-        print(f"  {name:<46} {h:>5} {t:>5} {l:>5} {m:>5} {residual:>10.5f}")
+        print(f"  {name:<46} {residual:>10.5f}")
 
-    final_landmarks = np.array(final_landmarks)  # (N, 4, 3) — Phase-1 detected
+    final_landmarks = np.array(final_landmarks)  # (N, 4, 3)
 
-    # Position-based landmarks (เหมือนที่ view_spharm_meshes.py ใช้):
-    #   หลัง realign — canonical คือ head=+Z, tail=-Z, lat=+X, med=-X
-    #   ใช้ argmax/argmin บนแต่ละแกน → ตำแหน่งที่เห็นจริงในรูป
+    # Check for abnormally high residuals
+    max_resid = np.linalg.norm(final_landmarks - canonical_scaled, axis=2).mean(axis=1).max()
+    if max_resid > 5.0:
+        print("\n" + "!" * 72)
+        print("WARNING: LANDMARK RE-ALIGNMENT RESIDUAL IS ABNORMALLY HIGH!")
+        print(f"Maximum subject residual is {max_resid:.4f} (expected < 1.0).")
+        print("This usually indicates that the input directory contains a mix of")
+        print("unaligned and aligned meshes, or shapes with different spatial coordinate systems.")
+        print("Please check and clean your input directory before running.")
+        print("!" * 72 + "\n")
+
+    # Position-based landmarks
     position_landmarks = []
     for i, _ in enumerate(subjects):
         pts = aligned_pts_list[i]
-        h_idx = int(np.argmax(pts[:, 2]))
-        t_idx = int(np.argmin(pts[:, 2]))
-        l_idx = int(np.argmax(pts[:, 0]))
-        m_idx = int(np.argmin(pts[:, 0]))
-        position_landmarks.append(pts[[h_idx, t_idx, l_idx, m_idx]])
+        h_pos_idx = int(np.argmax(pts[:, 2]))
+        t_pos_idx = int(np.argmin(pts[:, 2]))
+        l_pos_idx = int(np.argmax(pts[:, 0]))
+        m_pos_idx = int(np.argmin(pts[:, 0]))
+        position_landmarks.append(pts[[h_pos_idx, t_pos_idx, l_pos_idx, m_pos_idx]])
     position_landmarks = np.array(position_landmarks)  # (N, 4, 3)
 
     print()
     print("=" * 72)
-    print(f"Done. Processed {len(subjects)}/{len(files)} subjects.")
-    print(f"\nLandmark clustering quality (Phase-1 detected indices):")
-    print(f"  (might be noisy เพราะ Phase 1 anatomical detection ไม่ stable เสมอ)")
+    print(f"Done. Processed {len(subjects)} subjects.")
+    print(f"\nLandmark clustering quality (Phase-2 detected indices):")
     for k, name in enumerate(["HEAD", "TAIL", "LAT ", "MED "]):
         cluster_pts = final_landmarks[:, k, :]
         spread = float(np.linalg.norm(cluster_pts - cluster_pts.mean(axis=0),
                                       axis=1).mean())
         print(f"    {name}: mean distance from cluster center = {spread:.4f}")
-    print(f"\nLandmark clustering quality (position-based, ตรงกับ viewer):")
-    print(f"  (วัดว่า argmax/argmin บนแต่ละแกน ของทุก subject ตกที่ตำแหน่งใกล้กันมั้ย)")
+    print(f"\nLandmark clustering quality (position-based, matches viewer):")
     for k, name in enumerate(["HEAD", "TAIL", "LAT ", "MED "]):
         cluster_pts = position_landmarks[:, k, :]
         spread = float(np.linalg.norm(cluster_pts - cluster_pts.mean(axis=0),
                                       axis=1).mean())
         print(f"    {name}: mean distance from cluster center = {spread:.4f}")
-    print(f"\nOutput: *_SPHARM_realigned.vtk in {folder}")
-
-    # ---------- Phase 6: Resolve SPHARM parameterization flips ----------
-    # หลัง realign vertex correspondences ระหว่าง subjects ยังอาจมี ambiguity
-    # จาก SPHARM parameterization (180° rotations รอบแกน X/Y/Z บน parameter sphere)
-    # → ใช้ _para.vtk คำนวณ 4 permutations เลือกที่ทำให้ subject ตรงกับ template
-    #   (subject 0) ที่สุด แล้ว reorder vertices ให้ correspondences ถูกต้องสำหรับ PCA
-    # หมายเหตุ: cell topology ของ pca_ready จะ "พัง" (ไม่ใช่ render-able surface)
-    #           แต่ vertex correspondences ถูกต้อง — เป็น input สำหรับ ShapePCA
-    print(f"\nPhase 6: Resolving SPHARM parameterization flips (pca_ready output)...")
-
-    try:
-        from scipy.spatial import cKDTree
-    except ImportError:
-        print("  [WARN] scipy not installed — skipping flip resolution.")
-        print(f"        Run PCA on *_SPHARM_realigned.vtk instead.")
-        print("=" * 72)
-        return
-
-    para_files = sorted(glob.glob(os.path.join(folder, "*_para.vtk")))
-    if not para_files:
-        print(f"  [WARN] No _para.vtk in {folder} — skipping flip resolution.")
-        print("=" * 72)
-        return
-
-    print(f"  Using parameter sphere: {os.path.basename(para_files[0])}")
-    para_poly = load_polydata(para_files[0])
-    para_verts = points_to_numpy(para_poly)
-    para_verts = para_verts - para_verts.mean(axis=0)
-
-    tree = cKDTree(para_verts)
-    perms = {"Identity": np.arange(len(para_verts))}
-    for name, axes in [("FlipX", (1, 2)), ("FlipY", (0, 2)), ("FlipZ", (0, 1))]:
-        rot = para_verts.copy()
-        for ax in axes:
-            rot[:, ax] *= -1
-        _, nn = tree.query(rot, k=1)
-        perms[name] = nn
-
-    template_pts = aligned_pts_list[0]
-    flip_counts = {k: 0 for k in perms}
-
-    print(f"  {'Subject':<48} {'flip':<10} {'dist':>10}")
-    print("  " + "-" * 72)
-    for i, s in enumerate(subjects):
-        subj_pts = aligned_pts_list[i]
-        best_flip = "Identity"
-        best_dist = float("inf")
-        for name, P in perms.items():
-            d = float(np.mean(np.linalg.norm(subj_pts[P] - template_pts, axis=1)))
-            if d < best_dist:
-                best_dist = d
-                best_flip = name
-        flip_counts[best_flip] += 1
-
-        fixed_pts = subj_pts[perms[best_flip]]
-        out_poly = replace_points(s["poly"], fixed_pts)
-
-        base = s["file"]
-        for suf in ("_SPHARM_procalign.vtk", "_SPHARM_ellalign.vtk", "_SPHARM.vtk"):
-            if base.endswith(suf):
-                base = base[: -len(suf)]
-                break
-        out_path = base + "_SPHARM_pca_ready.vtk"
-        write_polydata(out_poly, out_path)
-
-        name = os.path.basename(s["file"])
-        for suf in ("_SPHARM_procalign.vtk", "_SPHARM_ellalign.vtk", "_SPHARM.vtk"):
-            name = name.replace(suf, "")
-        print(f"  {name:<48} {best_flip:<10} {best_dist:>10.4f}")
-
-    print(f"\n  Flip distribution:")
-    for k, v in flip_counts.items():
-        print(f"    {k:<10}: {v} subjects")
-    print(f"\nOutput: *_SPHARM_pca_ready.vtk in {folder}")
+    print(f"\nOutput: *_SPHARM_realigned.vtk and *_SPHARM_pca_ready.vtk in {folder}")
     print("=" * 72)
 
 

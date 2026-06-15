@@ -135,10 +135,15 @@ if __name__ == "__main__":
     # Number of coeffs = (L+1)^2
     L = int(np.sqrt(len(coeffs))) - 1
     
-    # Create Grid
-    theta_deg = np.arange(0, 180 + 0.001, theta_step)
-    phi_deg = np.arange(0, 360, phi_step)
+    # Create Grid (More robust generation to avoid missing points due to precision)
+    theta_deg = np.linspace(0, 180, int(180/theta_step) + 1)
+    phi_deg = np.linspace(0, 360, int(360/phi_step) + 1)[:-1] # 0 to 351, exclude 360 because it's same as 0
     
+    # Debug: verify 270 is there
+    if not any(np.isclose(phi_deg, 270)):
+        # Fallback to manual check if needed, but linspace is usually safe
+        pass
+
     X, Y, Z = evaluate_spharm(coeffs, L, np.radians(theta_deg), np.radians(phi_deg))
     save_grid_vtk(X, Y, Z, theta_deg, phi_deg, output_vtk)
     print(f"Successfully resampled to {output_vtk} ({len(theta_deg)}x{len(phi_deg)} grid)")

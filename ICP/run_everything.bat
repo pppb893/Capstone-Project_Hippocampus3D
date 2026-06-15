@@ -96,6 +96,10 @@ if exist "%OUTPUT_DIR%" (
         pause
         exit /b 1
     )
+    if exist "%OUTPUT_DIR%\spharm_results" (
+        echo [INFO] Cleaning up old SPHARM results to prevent duplicate/stale files...
+        rmdir /s /q "%OUTPUT_DIR%\spharm_results"
+    )
     echo.
 )
 

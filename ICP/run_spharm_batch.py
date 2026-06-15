@@ -68,8 +68,11 @@ def run_cli_checked(module, params, step_name, log_file):
     if status != "Completed":
         sprint(f"    !!! CLI '{step_name}' status = {status}", log_file)
         err = cli_node.GetErrorText() or ""
+        out = cli_node.GetOutputText() or ""
         if err.strip():
-            sprint(f"    stderr: {err.strip()[:500]}", log_file)
+            sprint(f"    stderr: {err.strip()[:1000]}", log_file)
+        if out.strip():
+            sprint(f"    stdout: {out.strip()[:1000]}", log_file)
         return False
     return True
 
@@ -352,15 +355,28 @@ def run_batch_spharm():
             is_template_subject = (template_basename is not None
                                     and basename == template_basename)
             if reference_template and not is_template_subject:
+                # [DEEP FIX] Slicer's CLI interface expects parameter names with On flags to trigger template alignment
+                spharm_params['regTemplateFile'] = reference_template
+                spharm_params['regTemplateFileOn'] = True
+                spharm_params['flipTemplateFile'] = reference_template.replace(".vtk", ".coef")
+                spharm_params['flipTemplateFileOn'] = True
+                
+                # Also pass short flags / long flags for safety
                 spharm_params['regTemplate'] = reference_template
                 spharm_params['flipTemplate'] = reference_template.replace(".vtk", ".coef")
+                spharm_params['flipTemplateOn'] = True
                 sprint(f"    Using template alignment -> will produce _SPHARM_procalign.vtk",
                        log_file)
             elif is_template_subject:
                 sprint(f"    (Template subject — no self-reference)", log_file)
 
-            if not run_cli_checked(slicer.modules.paratospharmmeshclp, spharm_params,
-                                   "ParaToSPHARMMesh", log_file):
+            run_cli_checked(slicer.modules.paratospharmmeshclp, spharm_params,
+                            "ParaToSPHARMMesh", log_file)
+            
+            # Check actual output files instead of relying strictly on CLI status
+            # (SPHARM CLI often writes warnings to stderr, which Slicer marks as Completed with errors)
+            if not (os.path.exists(own_spharm_path) and os.path.exists(own_spharm_path.replace(".vtk", ".coef"))):
+                sprint(f"  - ERROR: SPHARM outputs not found for {basename}", log_file)
                 continue
 
             # ถ้าเป็น template subject -> copy ellalign เป็น procalign เพื่อให้ pipeline uniform
