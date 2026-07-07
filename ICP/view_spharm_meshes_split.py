@@ -105,16 +105,14 @@ def load_polydata_smoothed(filepath):
 
 class SpharmMeshViewer:
     """
-    Viewer สำหรับตรวจ SPHARM mesh (output ของ SPHARM-PDM)
-      - OVERLAY  : ซ้อนทุก mesh, สีต่างกัน, semi-transparent
-                   -> เห็นทันทีว่า orientation ตรงกันมั้ย
+    Viewer สำหรับตรวจ SPHARM mesh (แยกซ้าย-ขวา ตามกลุ่มและสี)
+      - OVERLAY  : ซ้อนแยกซ้าย-ขวา สีน้ำเงินฝั่งซ้าย สีแดงฝั่งขวา
       - SLIDESHOW: เปิดทีละตัว + mean shape เป็น wireframe อ้างอิง
     """
 
     MODE_OVERLAY = "OVERLAY"
     MODE_SLIDESHOW = "SLIDESHOW"
 
-    # SPHARM meshes อยู่ใน normalized scale (~ +/- 1) -> box +/- 1.0
     REF_BOX_HALF = 1.0
 
     def __init__(self, spharm_dir):
@@ -178,6 +176,16 @@ class SpharmMeshViewer:
             print("[ERROR] No valid meshes loaded.")
             return
 
+        # คำนวณระยะห่าง (shift_amount) จากขนาดเฉลี่ยของ Mesh
+        x_mins = []
+        x_maxs = []
+        for poly in self.meshes:
+            b = poly.GetBounds()
+            x_mins.append(b[0])
+            x_maxs.append(b[1])
+        avg_x_width = np.mean(x_maxs) - np.mean(x_mins) if self.meshes else 2.0
+        self.shift_amount = 1.1 * avg_x_width
+
         # mean shape candidates (จาก PCA output ถ้ามี)
         self.mean_poly = None
         candidates = [
@@ -215,7 +223,7 @@ class SpharmMeshViewer:
         self.render_window.AddRenderer(self.renderer)
         self.render_window.SetSize(1300, 950)
         self.render_window.SetWindowName(
-            f"SPHARM Mesh Viewer ({self.source}, {len(self.meshes)} subjects)"
+            f"SPHARM Mesh Split Viewer (Left: Blue/Normal, Right: Red/Diseased)"
         )
 
         self.interactor = vtk.vtkRenderWindowInteractor()
@@ -272,18 +280,20 @@ class SpharmMeshViewer:
             ax_prop.SetLineWidth(2)
         self.renderer.AddActor(world_axes)
 
-        # reference box
-        outline = vtk.vtkOutlineSource()
-        h = self.REF_BOX_HALF
-        outline.SetBounds(-h, h, -h, h, -h, h)
-        out_mapper = vtk.vtkPolyDataMapper()
-        out_mapper.SetInputConnection(outline.GetOutputPort())
-        out_actor = vtk.vtkActor()
-        out_actor.SetMapper(out_mapper)
-        out_actor.GetProperty().SetColor(0.35, 0.35, 0.45)
-        out_actor.GetProperty().SetOpacity(0.5)
-        out_actor.GetProperty().SetLineWidth(1)
-        self.renderer.AddActor(out_actor)
+        # reference box (Left and Right)
+        for offset_x in (-self.shift_amount, self.shift_amount):
+            outline = vtk.vtkOutlineSource()
+            h = self.REF_BOX_HALF
+            outline.SetBounds(-h, h, -h, h, -h, h)
+            out_mapper = vtk.vtkPolyDataMapper()
+            out_mapper.SetInputConnection(outline.GetOutputPort())
+            out_actor = vtk.vtkActor()
+            out_actor.SetMapper(out_mapper)
+            out_actor.SetPosition(offset_x, 0, 0)
+            out_actor.GetProperty().SetColor(0.35, 0.35, 0.45)
+            out_actor.GetProperty().SetOpacity(0.5)
+            out_actor.GetProperty().SetLineWidth(1)
+            self.renderer.AddActor(out_actor)
 
         # observers
         self.interactor.AddObserver("KeyPressEvent", self.on_key_press)
@@ -299,51 +309,57 @@ class SpharmMeshViewer:
             mapper.ScalarVisibilityOff()
             actor = vtk.vtkActor()
             actor.SetMapper(mapper)
+            
             # Classify by name to match scatter plot coloring (Red/Blue only)
             name = self.basenames[i]
             is_left_side = name.startswith("left_")
             if "_Healthy" in name or "HFH_" in name:
                 r, g, b = (0.2549, 0.4118, 0.8824)  # royalblue (blue)
+                is_red = False
             elif (is_left_side and "_Left-TLE" in name) or (not is_left_side and "_Right-TLE" in name):
                 r, g, b = (0.8627, 0.0784, 0.2353)  # crimson (red)
+                is_red = True
             elif (is_left_side and "_Right-TLE" in name) or (not is_left_side and "_Left-TLE" in name):
                 r, g, b = (0.2549, 0.4118, 0.8824)  # royalblue (blue)
+                is_red = False
             else:
                 r, g, b = (0.5, 0.5, 0.5)            # gray
+                is_red = False
+
             prop = actor.GetProperty()
             prop.SetColor(r, g, b)
             prop.SetInterpolationToGouraud()
             prop.SetAmbient(0.25)
             prop.SetDiffuse(0.75)
             prop.SetSpecular(0.15)
+            
+            # Position shift: Blue to Left, Red to Right
+            offset_x = self.shift_amount if is_red else -self.shift_amount
+            actor.SetPosition(offset_x, 0, 0)
+            
             self.renderer.AddActor(actor)
             self.actors.append(actor)
 
-        self.mean_actor = None
+        # Mean shape: render twice (left and right)
+        self.mean_actors = []
         if self.mean_poly is not None:
-            mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(self.mean_poly)
-            mapper.ScalarVisibilityOff()
-            actor = vtk.vtkActor()
-            actor.SetMapper(mapper)
-            p = actor.GetProperty()
-            p.SetColor(1.0, 1.0, 1.0)
-            p.SetOpacity(0.5)
-            p.SetRepresentationToWireframe()
-            p.SetLineWidth(1)
-            self.renderer.AddActor(actor)
-            self.mean_actor = actor
+            for offset_x in (-self.shift_amount, self.shift_amount):
+                mapper = vtk.vtkPolyDataMapper()
+                mapper.SetInputData(self.mean_poly)
+                mapper.ScalarVisibilityOff()
+                actor = vtk.vtkActor()
+                actor.SetMapper(mapper)
+                actor.SetPosition(offset_x, 0, 0)
+                p = actor.GetProperty()
+                p.SetColor(1.0, 1.0, 1.0)
+                p.SetOpacity(0.5)
+                p.SetRepresentationToWireframe()
+                p.SetLineWidth(1)
+                self.renderer.AddActor(actor)
+                self.mean_actors.append(actor)
 
         # ------------------------------------------------------------
-        # Landmark dots: 4 จุด (HEAD/TAIL/LAT/MED) ต่อ subject
-        # เก็บ list-of-list เพื่อ filter visibility ตาม mode ได้
-        #   OVERLAY  : ทุก subject's dots = visible -> เห็น 4 cluster
-        #   SLIDESHOW: เฉพาะ subject ปัจจุบัน -> ไม่ค้าง
-        #
-        # สำหรับ realigned mesh: ใช้ positional rule (canonical fixed)
-        #   -> dot สีจะตรง cluster เสมอ
-        # สำหรับ non-realigned (ellalign/SPHARM): ใช้ anatomical detection
-        #   -> อาจ flip ได้เพราะ orientation ยังไม่ลง canonical
+        # Landmark dots
         # ------------------------------------------------------------
         self.landmark_actors_per_subject = []
         sphere_radius = self._estimate_landmark_dot_radius()
@@ -369,7 +385,20 @@ class SpharmMeshViewer:
                     use_fixed_indices = False
 
         use_positional = self.source == "realigned"
-        for poly in self.meshes:
+        for i, poly in enumerate(self.meshes):
+            name = self.basenames[i]
+            is_left_side = name.startswith("left_")
+            if "_Healthy" in name or "HFH_" in name:
+                is_red = False
+            elif (is_left_side and "_Left-TLE" in name) or (not is_left_side and "_Right-TLE" in name):
+                is_red = True
+            elif (is_left_side and "_Right-TLE" in name) or (not is_left_side and "_Left-TLE" in name):
+                is_red = False
+            else:
+                is_red = False
+                
+            offset_x = self.shift_amount if is_red else -self.shift_amount
+            
             pts = poly_points_numpy(poly)
             try:
                 if use_fixed_indices and fixed_indices is not None:
@@ -398,12 +427,15 @@ class SpharmMeshViewer:
                 sp.SetColor(*color)
                 sp.SetAmbient(0.6)
                 sp.SetDiffuse(0.4)
+                
+                # Apply position shift
+                s_actor.SetPosition(offset_x, 0, 0)
+                
                 self.renderer.AddActor(s_actor)
                 subject_actors.append(s_actor)
             self.landmark_actors_per_subject.append(subject_actors)
 
     def _estimate_landmark_dot_radius(self):
-        """ขนาด sphere ของ landmark dot = 2% ของ mesh diagonal เฉลี่ย"""
         diag_total = 0.0
         for m in self.meshes:
             b = m.GetBounds()
@@ -426,11 +458,10 @@ class SpharmMeshViewer:
             else:  # slideshow
                 a.SetVisibility(i == self.current_idx)
                 prop.SetOpacity(1.0)
-        if self.mean_actor is not None:
-            self.mean_actor.SetVisibility(self.show_mean)
-        # landmark dots: filter per-subject ตาม mode
-        #   OVERLAY  -> ทุก subject's dots
-        #   SLIDESHOW -> เฉพาะ current_idx
+                
+        for ma in getattr(self, "mean_actors", []):
+            ma.SetVisibility(self.show_mean)
+
         for i, subj_actors in enumerate(
                 getattr(self, "landmark_actors_per_subject", [])):
             if self.mode == self.MODE_OVERLAY:
@@ -443,35 +474,34 @@ class SpharmMeshViewer:
         self.render_window.Render()
 
     def _update_info_text(self):
-        if self.mean_actor is None:
-            mean_state = "N/A"
-        else:
-            mean_state = "ON" if self.show_mean else "OFF"
+        mean_state = "ON" if self.show_mean else "OFF"
 
         if self.mode == self.MODE_OVERLAY:
             txt = (
-                f"MODE: OVERLAY   |   {len(self.actors)} meshes ({self.source})   |   "
-                f"opacity = {self.opacity_overlay:.2f}\n"
-                f"Mean shape (white wireframe): {mean_state}\n"
-                f"Reference box: +/- {self.REF_BOX_HALF:.1f} units"
+                f"MODE: OVERLAY (Split View)   |   {len(self.actors)} meshes ({self.source})\n"
+                f"Left side: Normal (Blue)   |   Right side: Diseased (Red)\n"
+                f"Mean shapes (white wireframes): {mean_state}"
             )
         else:
             name = self.basenames[self.current_idx]
             b = self.meshes[self.current_idx].GetBounds()
             n_pts = self.meshes[self.current_idx].GetNumberOfPoints()
+            # Check color category of the current slideshow mesh
+            is_red = self.actors[self.current_idx].GetProperty().GetColor()[0] > 0.5
+            side_str = "Right (Diseased)" if is_red else "Left (Normal)"
             txt = (
                 f"MODE: SLIDESHOW   [{self.current_idx+1}/{len(self.actors)}]   "
-                f"({self.source})\n"
+                f"({self.source})   |   Side: {side_str}\n"
                 f"Subject: {name}   ({n_pts} pts)\n"
                 f"Bounds  X[{b[0]:+.3f},{b[1]:+.3f}]  "
                 f"Y[{b[2]:+.3f},{b[3]:+.3f}]  Z[{b[4]:+.3f},{b[5]:+.3f}]\n"
-                f"Mean shape: {mean_state}"
+                f"Mean shapes: {mean_state}"
             )
         self.text_actor.SetInput(txt)
 
     def reset_camera(self):
         cam = self.renderer.GetActiveCamera()
-        cam.SetPosition(0, -4, 0.8)
+        cam.SetPosition(0, -5, 1.2)
         cam.SetFocalPoint(0, 0, 0)
         cam.SetViewUp(0, 0, 1)
         self.renderer.ResetCamera()
@@ -531,11 +561,14 @@ class SpharmMeshViewer:
         if not self.meshes:
             return
         print("\n" + "=" * 56)
-        print("SPHARM MESH VIEWER")
+        print("SPHARM MESH SPLIT VIEWER (Side-by-Side)")
         print(f"  Source:       {self.source}")
+        print("  Left side:    Normal subjects (Blue)")
+        print("  Right side:   Diseased subjects (Red)")
         print("  Modes:        [1] Overlay   [2] Slideshow")
         print("  Slideshow:    [N/P/space/scroll/Right/Left]")
         print("  Mean shape:   [M] toggle")
+        print("  Landmarks:    [L] toggle")
         print("  Wireframe:    [W] toggle")
         print("  Opacity:      [+] / [-]  (overlay mode only)")
         print("  Camera:       [R] reset, drag mouse to rotate/pan/zoom")

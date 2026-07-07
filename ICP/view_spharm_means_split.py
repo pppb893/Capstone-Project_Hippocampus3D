@@ -16,11 +16,6 @@ import numpy as np
 def find_landmarks_by_position(pts):
     """
     หา 4 landmark indices ตาม canonical position (สำหรับ realigned mesh).
-
-    หลัง realign — canonical คือ:
-      HEAD = +Z   TAIL = -Z   LAT = +X   MED = -X
-
-    -> ใช้ argmax/argmin ในแต่ละแกน → label คงที่ ไม่ flip อีก
     """
     head_idx = int(np.argmax(pts[:, 2]))
     tail_idx = int(np.argmin(pts[:, 2]))
@@ -30,7 +25,6 @@ def find_landmarks_by_position(pts):
 
 
 def find_anatomical_landmarks(pts):
-    """หา 4 anatomical landmarks: head, tail, lateral, medial (สำหรับ non-realigned)"""
     centroid = pts.mean(axis=0)
     pts_c = pts - centroid
     _, _, Vt = np.linalg.svd(pts_c, full_matrices=False)
@@ -81,7 +75,6 @@ def poly_points_numpy(poly):
 # =============================================================================
 
 def load_polydata_smoothed(filepath):
-    """อ่าน .vtk + compute normals (smooth shading)"""
     reader = vtk.vtkPolyDataReader()
     reader.SetFileName(filepath)
     reader.Update()
@@ -99,22 +92,43 @@ def load_polydata_smoothed(filepath):
     return normals.GetOutput()
 
 
+def create_mean_polydata(template_poly, mean_coords):
+    if mean_coords is None or template_poly is None:
+        return None
+    
+    new_poly = vtk.vtkPolyData()
+    new_poly.DeepCopy(template_poly)
+    
+    vtk_pts = vtk.vtkPoints()
+    for pt in mean_coords:
+        vtk_pts.InsertNextPoint(pt[0], pt[1], pt[2])
+    new_poly.SetPoints(vtk_pts)
+    
+    normals = vtk.vtkPolyDataNormals()
+    normals.SetInputData(new_poly)
+    normals.ConsistencyOn()
+    normals.AutoOrientNormalsOn()
+    normals.SplittingOff()
+    normals.ComputePointNormalsOn()
+    normals.ComputeCellNormalsOff()
+    normals.Update()
+    
+    return normals.GetOutput()
+
+
 # =============================================================================
 # Viewer
 # =============================================================================
 
-class SpharmMeshViewer:
+class SpharmMeanViewer:
     """
-    Viewer สำหรับตรวจ SPHARM mesh (output ของ SPHARM-PDM)
-      - OVERLAY  : ซ้อนทุก mesh, สีต่างกัน, semi-transparent
-                   -> เห็นทันทีว่า orientation ตรงกันมั้ย
-      - SLIDESHOW: เปิดทีละตัว + mean shape เป็น wireframe อ้างอิง
+    Viewer สำหรับเปรียบเทียบ Mean Shape ของกลุ่มปกติ (น้ำเงิน) และกลุ่มโรค (แดง) เคียงข้างกัน
+    พร้อมแสดงเส้น Displacement Vectors ของแต่ละฝั่งเพื่อเปรียบเทียบ
     """
 
     MODE_OVERLAY = "OVERLAY"
     MODE_SLIDESHOW = "SLIDESHOW"
 
-    # SPHARM meshes อยู่ใน normalized scale (~ +/- 1) -> box +/- 1.0
     REF_BOX_HALF = 1.0
 
     def __init__(self, spharm_dir):
@@ -135,7 +149,6 @@ class SpharmMeshViewer:
         if not files:
             files = sorted(glob.glob(os.path.join(self.spharm_dir,
                                                   "*_SPHARM.vtk")))
-            # filter out ellalign/grid/realigned variants
             files = [f for f in files
                      if not any(s in os.path.basename(f)
                                 for s in ("_ellalign", "_grid", "_realigned",
@@ -155,46 +168,131 @@ class SpharmMeshViewer:
         self.current_idx = 0
         self.mode = self.MODE_OVERLAY
         self.wireframe = False
-        self.opacity_overlay = 0.25
-        self.show_mean = True
-        self.show_landmarks = True
+        self.opacity_overlay = 0.8
+        self.show_vectors = True
+        self.show_landmarks = False
 
-        # load
-        self.meshes = []
+        # load and classify coordinates
         self.basenames = []
+        blue_points = []
+        red_points = []
+        template_poly = None
+
         for i, f in enumerate(files):
-            print(f"  [{i+1}/{len(files)}] {os.path.basename(f)}")
             poly = load_polydata_smoothed(f)
             if poly is None:
-                print(f"      skipped (empty)")
                 continue
-            self.meshes.append(poly)
+            if template_poly is None:
+                template_poly = poly
+            
             name = os.path.basename(f)
             for suf in ("_SPHARM_realigned.vtk", "_SPHARM_ellalign.vtk", "_SPHARM.vtk"):
                 name = name.replace(suf, "")
             self.basenames.append(name)
+            
+            is_left_side = name.startswith("left_")
+            # Classification
+            if "_Healthy" in name or "HFH_" in name:
+                is_red = False
+            elif (is_left_side and "_Left-TLE" in name) or (not is_left_side and "_Right-TLE" in name):
+                is_red = True
+            elif (is_left_side and "_Right-TLE" in name) or (not is_left_side and "_Left-TLE" in name):
+                is_red = False
+            else:
+                is_red = False
 
-        if not self.meshes:
+            pts = poly_points_numpy(poly)
+            if is_red:
+                red_points.append(pts)
+            else:
+                blue_points.append(pts)
+
+        if template_poly is None:
             print("[ERROR] No valid meshes loaded.")
             return
 
-        # mean shape candidates (จาก PCA output ถ้ามี)
-        self.mean_poly = None
-        candidates = [
-            os.path.join(os.path.dirname(self.spharm_dir), "pca_results",
-                         "pca_model_0_mean.vtk"),
-            os.path.join(os.path.dirname(self.spharm_dir), "pca_results",
-                         "pca_model_All_mean.vtk"),
-        ]
-        for c in candidates:
-            if os.path.exists(c):
-                print(f"Loading mean shape: {c}")
-                self.mean_poly = load_polydata_smoothed(c)
-                if self.mean_poly is not None:
-                    break
+        # 1. คำนวณพิกัดเฉลี่ยของแต่ละกลุ่ม
+        print(f"Computing Mean Shape for Normal group (N={len(blue_points)})...")
+        self.mean_blue_coords = np.mean(blue_points, axis=0) if blue_points else None
+        print(f"Computing Mean Shape for Diseased group (N={len(red_points)})...")
+        self.mean_red_coords = np.mean(red_points, axis=0) if red_points else None
 
-        if self.mean_poly is None:
-            print("(no pca_model mean shape found - reference overlay disabled)")
+        if self.mean_blue_coords is None or self.mean_red_coords is None:
+            print("[ERROR] Need both Normal and Diseased groups to compute means.")
+            return
+
+        # 2. สร้าง PolyData ของ Mean ทั้งสอง
+        self.mean_blue_poly = create_mean_polydata(template_poly, self.mean_blue_coords)
+        self.mean_red_poly = create_mean_polydata(template_poly, self.mean_red_coords)
+
+        # 3. คำนวณ Displacement Vector และ Magnitude ของจุดแต่ละจุด (ก่อนการ shift ตน.)
+        displacement_vectors_blue = []
+        displacement_vectors_red = []
+        distances = []
+        for i in range(len(self.mean_blue_coords)):
+            p_blue = self.mean_blue_coords[i]
+            p_red = self.mean_red_coords[i]
+            vec = p_red - p_blue
+            dist = np.linalg.norm(vec)
+            displacement_vectors_blue.append(vec)     # Normal -> Diseased (ทิศชี้ไปหาสีแดง)
+            displacement_vectors_red.append(-vec)     # Diseased -> Normal (ทิศชี้กลับมาสีน้ำเงิน)
+            distances.append(dist)
+
+        self.max_dist = max(distances)
+        self.mean_dist = np.mean(distances)
+        print(f"  Max displacement:  {self.max_dist:.4f}")
+        print(f"  Mean displacement: {self.mean_dist:.4f}")
+
+        # แนบ Scalars และ Vectors ของทั้งสองฝั่ง
+        scalars_blue = vtk.vtkDoubleArray()
+        scalars_blue.SetName("DisplacementMagnitude")
+        for val in distances:
+            scalars_blue.InsertNextValue(val)
+        self.mean_blue_poly.GetPointData().SetScalars(scalars_blue)
+
+        vectors_blue = vtk.vtkDoubleArray()
+        vectors_blue.SetNumberOfComponents(3)
+        vectors_blue.SetName("DisplacementVectors")
+        for vec in displacement_vectors_blue:
+            vectors_blue.InsertNextTuple3(vec[0], vec[1], vec[2])
+        self.mean_blue_poly.GetPointData().SetVectors(vectors_blue)
+
+        scalars_red = vtk.vtkDoubleArray()
+        scalars_red.SetName("DisplacementMagnitude")
+        for val in distances:
+            scalars_red.InsertNextValue(val)
+        self.mean_red_poly.GetPointData().SetScalars(scalars_red)
+
+        vectors_red = vtk.vtkDoubleArray()
+        vectors_red.SetNumberOfComponents(3)
+        vectors_red.SetName("DisplacementVectors")
+        for vec in displacement_vectors_red:
+            vectors_red.InsertNextTuple3(vec[0], vec[1], vec[2])
+        self.mean_red_poly.GetPointData().SetVectors(vectors_red)
+
+        self.meshes = []
+        self.mesh_names = []
+        self.mesh_colors = []
+        self.mesh_is_red = []
+
+        if self.mean_blue_poly:
+            self.meshes.append(self.mean_blue_poly)
+            self.mesh_names.append("Mean Normal (Blue)")
+            self.mesh_colors.append((0.2549, 0.4118, 0.8824))
+            self.mesh_is_red.append(False)
+        if self.mean_red_poly:
+            self.meshes.append(self.mean_red_poly)
+            self.mesh_names.append("Mean Diseased (Red)")
+            self.mesh_colors.append((0.8627, 0.0784, 0.2353))
+            self.mesh_is_red.append(True)
+
+        # คำนวณระยะห่าง (shift_amount) จากขนาดเฉลี่ยของ Mesh
+        b = self.meshes[0].GetBounds()
+        self.shift_amount = 1.1 * (b[1] - b[0])
+
+        # คำนวณ Scale Factor เริ่มต้นสำหรับหัวลูกศร (10% ของ mesh diagonal)
+        mesh_diag = np.sqrt((b[1]-b[0])**2 + (b[3]-b[2])**2 + (b[5]-b[4])**2)
+        self.arrow_scale = (mesh_diag * 0.1) / self.max_dist if self.max_dist > 1e-6 else 1.0
 
         self.setup_vtk()
         self.build_actors()
@@ -211,11 +309,11 @@ class SpharmMeshViewer:
 
         self.render_window = vtk.vtkRenderWindow()
         self.render_window.SetAlphaBitPlanes(1)
-        self.render_window.SetMultiSamples(0)
+        self.render_window.SetMultiSamples(8)
         self.render_window.AddRenderer(self.renderer)
         self.render_window.SetSize(1300, 950)
         self.render_window.SetWindowName(
-            f"SPHARM Mesh Viewer ({self.source}, {len(self.meshes)} subjects)"
+            f"SPHARM Mean Shapes Split Viewer (Left: Normal, Right: Diseased)"
         )
 
         self.interactor = vtk.vtkRenderWindowInteractor()
@@ -242,10 +340,10 @@ class SpharmMeshViewer:
         help_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
         help_actor.GetPositionCoordinate().SetValue(0.02, 0.02)
         help_actor.SetInput(
-            "[1] Overlay   [2] Slideshow   [M] Mean   [L] Landmark dots   [W] Wireframe\n"
+            "[1] Overlay   [2] Slideshow   [V] Toggle vector arrows   [W] Wireframe\n"
+            "[ [ ] Decrease arrow size   [ ] ] Increase arrow size   [L] Toggle landmarks\n"
             "[N / P / Space / scroll / Right / Left]  Next / Prev (slideshow)\n"
-            "[+] / [-]  Overlay opacity     [R] Reset camera     [Q / Esc] Quit\n"
-            "Landmark colors:  RED=head  BLUE=tail  GREEN=lateral  YELLOW=medial"
+            "[+] / [-]  Overlay opacity     [R] Reset camera     [Q / Esc] Quit"
         )
         self.renderer.AddActor2D(help_actor)
 
@@ -272,18 +370,20 @@ class SpharmMeshViewer:
             ax_prop.SetLineWidth(2)
         self.renderer.AddActor(world_axes)
 
-        # reference box
-        outline = vtk.vtkOutlineSource()
-        h = self.REF_BOX_HALF
-        outline.SetBounds(-h, h, -h, h, -h, h)
-        out_mapper = vtk.vtkPolyDataMapper()
-        out_mapper.SetInputConnection(outline.GetOutputPort())
-        out_actor = vtk.vtkActor()
-        out_actor.SetMapper(out_mapper)
-        out_actor.GetProperty().SetColor(0.35, 0.35, 0.45)
-        out_actor.GetProperty().SetOpacity(0.5)
-        out_actor.GetProperty().SetLineWidth(1)
-        self.renderer.AddActor(out_actor)
+        # reference box (Left and Right)
+        for offset_x in (-self.shift_amount, self.shift_amount):
+            outline = vtk.vtkOutlineSource()
+            h = self.REF_BOX_HALF
+            outline.SetBounds(-h, h, -h, h, -h, h)
+            out_mapper = vtk.vtkPolyDataMapper()
+            out_mapper.SetInputConnection(outline.GetOutputPort())
+            out_actor = vtk.vtkActor()
+            out_actor.SetMapper(out_mapper)
+            out_actor.SetPosition(offset_x, 0, 0)
+            out_actor.GetProperty().SetColor(0.35, 0.35, 0.45)
+            out_actor.GetProperty().SetOpacity(0.5)
+            out_actor.GetProperty().SetLineWidth(1)
+            self.renderer.AddActor(out_actor)
 
         # observers
         self.interactor.AddObserver("KeyPressEvent", self.on_key_press)
@@ -291,60 +391,89 @@ class SpharmMeshViewer:
         self.interactor.AddObserver("MouseWheelBackwardEvent", self.on_wheel_backward)
 
     def build_actors(self):
-        N = len(self.meshes)
+        # 1. Lookup Table (Color Map): Blue (min) -> Cyan -> Green -> Yellow -> Red (max)
+        self.lut = vtk.vtkLookupTable()
+        self.lut.SetNumberOfTableValues(256)
+        self.lut.SetHueRange(0.6667, 0.0) # blue to red
+        self.lut.Build()
+
+        # 2. Color Bar Legend (ขวา)
+        self.scalar_bar = vtk.vtkScalarBarActor()
+        self.scalar_bar.SetLookupTable(self.lut)
+        self.scalar_bar.SetTitle("Deformation (mm)" if "realigned" in self.source or "pca_ready" in self.source else "Deformation (units)")
+        self.scalar_bar.SetNumberOfLabels(5)
+        self.scalar_bar.GetTitleTextProperty().SetColor(1, 1, 1)
+        self.scalar_bar.GetTitleTextProperty().BoldOn()
+        self.scalar_bar.GetTitleTextProperty().SetFontSize(14)
+        self.scalar_bar.GetLabelTextProperty().SetColor(1, 1, 1)
+        self.scalar_bar.SetWidth(0.1)
+        self.scalar_bar.SetHeight(0.7)
+        self.scalar_bar.GetPositionCoordinate().SetValue(0.88, 0.15)
+        self.renderer.AddActor2D(self.scalar_bar)
+
+        # 3. สร้าง Actor ของตัวเฉลี่ยซ้ายขวา
         self.actors = []
         for i, poly in enumerate(self.meshes):
             mapper = vtk.vtkPolyDataMapper()
             mapper.SetInputData(poly)
-            mapper.ScalarVisibilityOff()
+            mapper.SetScalarRange(0.0, self.max_dist)
+            mapper.SetLookupTable(self.lut)
+            
             actor = vtk.vtkActor()
             actor.SetMapper(mapper)
-            # Classify by name to match scatter plot coloring (Red/Blue only)
-            name = self.basenames[i]
-            is_left_side = name.startswith("left_")
-            if "_Healthy" in name or "HFH_" in name:
-                r, g, b = (0.2549, 0.4118, 0.8824)  # royalblue (blue)
-            elif (is_left_side and "_Left-TLE" in name) or (not is_left_side and "_Right-TLE" in name):
-                r, g, b = (0.8627, 0.0784, 0.2353)  # crimson (red)
-            elif (is_left_side and "_Right-TLE" in name) or (not is_left_side and "_Left-TLE" in name):
-                r, g, b = (0.2549, 0.4118, 0.8824)  # royalblue (blue)
-            else:
-                r, g, b = (0.5, 0.5, 0.5)            # gray
+            
+            is_red = self.mesh_is_red[i]
+            offset_x = self.shift_amount if is_red else -self.shift_amount
+            actor.SetPosition(offset_x, 0, 0)
+            
             prop = actor.GetProperty()
-            prop.SetColor(r, g, b)
             prop.SetInterpolationToGouraud()
-            prop.SetAmbient(0.25)
-            prop.SetDiffuse(0.75)
-            prop.SetSpecular(0.15)
+            prop.SetAmbient(0.15)
+            prop.SetDiffuse(0.85)
+            prop.SetSpecular(0.2)
+            prop.SetSpecularPower(20)
+            
             self.renderer.AddActor(actor)
             self.actors.append(actor)
 
-        self.mean_actor = None
-        if self.mean_poly is not None:
-            mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputData(self.mean_poly)
-            mapper.ScalarVisibilityOff()
-            actor = vtk.vtkActor()
-            actor.SetMapper(mapper)
-            p = actor.GetProperty()
-            p.SetColor(1.0, 1.0, 1.0)
-            p.SetOpacity(0.5)
-            p.SetRepresentationToWireframe()
-            p.SetLineWidth(1)
-            self.renderer.AddActor(actor)
-            self.mean_actor = actor
+        # 4. Glyph สำหรับหัวลูกศร
+        self.arrow_source = vtk.vtkArrowSource()
+        self.arrow_source.SetTipResolution(16)
+        self.arrow_source.SetTipLength(0.25)
+        self.arrow_source.SetTipRadius(0.08)
+        self.arrow_source.SetShaftRadius(0.025)
 
-        # ------------------------------------------------------------
-        # Landmark dots: 4 จุด (HEAD/TAIL/LAT/MED) ต่อ subject
-        # เก็บ list-of-list เพื่อ filter visibility ตาม mode ได้
-        #   OVERLAY  : ทุก subject's dots = visible -> เห็น 4 cluster
-        #   SLIDESHOW: เฉพาะ subject ปัจจุบัน -> ไม่ค้าง
-        #
-        # สำหรับ realigned mesh: ใช้ positional rule (canonical fixed)
-        #   -> dot สีจะตรง cluster เสมอ
-        # สำหรับ non-realigned (ellalign/SPHARM): ใช้ anatomical detection
-        #   -> อาจ flip ได้เพราะ orientation ยังไม่ลง canonical
-        # ------------------------------------------------------------
+        self.glyphs = []
+        self.glyph_actors = []
+        for i, poly in enumerate(self.meshes):
+            is_red = self.mesh_is_red[i]
+            offset_x = self.shift_amount if is_red else -self.shift_amount
+            
+            glyph = vtk.vtkGlyph3D()
+            glyph.SetSourceConnection(self.arrow_source.GetOutputPort())
+            glyph.SetInputData(poly)
+            glyph.SetVectorModeToUseVector()
+            glyph.SetScaleModeToScaleByVector()
+            glyph.SetScaleFactor(self.arrow_scale)
+            glyph.OrientOn()
+            glyph.Update()
+            self.glyphs.append(glyph)
+            
+            glyph_mapper = vtk.vtkPolyDataMapper()
+            glyph_mapper.SetInputConnection(glyph.GetOutputPort())
+            glyph_mapper.SetScalarRange(0.0, self.max_dist)
+            glyph_mapper.SetLookupTable(self.lut)
+            
+            glyph_actor = vtk.vtkActor()
+            glyph_actor.SetMapper(glyph_mapper)
+            glyph_actor.GetProperty().SetAmbient(0.3)
+            glyph_actor.GetProperty().SetDiffuse(0.7)
+            glyph_actor.SetPosition(offset_x, 0, 0) # เลื่อนหัวลูกศรตามฝั่งของโมเดล
+            
+            self.renderer.AddActor(glyph_actor)
+            self.glyph_actors.append(glyph_actor)
+
+        # 5. Landmark dots
         self.landmark_actors_per_subject = []
         sphere_radius = self._estimate_landmark_dot_radius()
         landmark_colors = [
@@ -354,13 +483,11 @@ class SpharmMeshViewer:
             (1.0,  1.0,  0.3),   # med   - yellow
         ]
         
-        # Determine fixed vertex indices from the template shape to ensure correspondence visualization
         use_fixed_indices = (self.source in ("pca_ready", "realigned", "procalign") or "procalign" in self.source)
         fixed_indices = None
         if use_fixed_indices and len(self.meshes) > 0:
             ref_pts = poly_points_numpy(self.meshes[0])
             try:
-                # First try positional detection since it's aligned
                 fixed_indices = find_landmarks_by_position(ref_pts)
             except Exception:
                 try:
@@ -369,7 +496,10 @@ class SpharmMeshViewer:
                     use_fixed_indices = False
 
         use_positional = self.source == "realigned"
-        for poly in self.meshes:
+        for i, poly in enumerate(self.meshes):
+            is_red = self.mesh_is_red[i]
+            offset_x = self.shift_amount if is_red else -self.shift_amount
+            
             pts = poly_points_numpy(poly)
             try:
                 if use_fixed_indices and fixed_indices is not None:
@@ -398,12 +528,15 @@ class SpharmMeshViewer:
                 sp.SetColor(*color)
                 sp.SetAmbient(0.6)
                 sp.SetDiffuse(0.4)
+                
+                # Apply position shift
+                s_actor.SetPosition(offset_x, 0, 0)
+                
                 self.renderer.AddActor(s_actor)
                 subject_actors.append(s_actor)
             self.landmark_actors_per_subject.append(subject_actors)
 
     def _estimate_landmark_dot_radius(self):
-        """ขนาด sphere ของ landmark dot = 2% ของ mesh diagonal เฉลี่ย"""
         diag_total = 0.0
         for m in self.meshes:
             b = m.GetBounds()
@@ -426,11 +559,14 @@ class SpharmMeshViewer:
             else:  # slideshow
                 a.SetVisibility(i == self.current_idx)
                 prop.SetOpacity(1.0)
-        if self.mean_actor is not None:
-            self.mean_actor.SetVisibility(self.show_mean)
-        # landmark dots: filter per-subject ตาม mode
-        #   OVERLAY  -> ทุก subject's dots
-        #   SLIDESHOW -> เฉพาะ current_idx
+
+        # ควบคุมการแสดงผลลูกศร
+        for i, ga in enumerate(self.glyph_actors):
+            if self.mode == self.MODE_OVERLAY:
+                ga.SetVisibility(self.show_vectors)
+            else:
+                ga.SetVisibility(self.show_vectors and (i == self.current_idx))
+
         for i, subj_actors in enumerate(
                 getattr(self, "landmark_actors_per_subject", [])):
             if self.mode == self.MODE_OVERLAY:
@@ -443,35 +579,32 @@ class SpharmMeshViewer:
         self.render_window.Render()
 
     def _update_info_text(self):
-        if self.mean_actor is None:
-            mean_state = "N/A"
-        else:
-            mean_state = "ON" if self.show_mean else "OFF"
-
+        v_state = "ON" if self.show_vectors else "OFF"
+        
         if self.mode == self.MODE_OVERLAY:
             txt = (
-                f"MODE: OVERLAY   |   {len(self.actors)} meshes ({self.source})   |   "
-                f"opacity = {self.opacity_overlay:.2f}\n"
-                f"Mean shape (white wireframe): {mean_state}\n"
-                f"Reference box: +/- {self.REF_BOX_HALF:.1f} units"
+                f"MODE: OVERLAY (Mean Shapes Split Compare)   |   ({self.source})\n"
+                f"Left side: MEAN Normal (Blue)   |   Right side: MEAN Diseased (Red)\n"
+                f"Vector Arrows: {v_state} (Scale: {self.arrow_scale:.2f}x)   |   Opacity = {self.opacity_overlay:.2f}"
             )
         else:
-            name = self.basenames[self.current_idx]
+            name = self.mesh_names[self.current_idx]
             b = self.meshes[self.current_idx].GetBounds()
             n_pts = self.meshes[self.current_idx].GetNumberOfPoints()
+            side_str = "Right (Diseased)" if self.mesh_is_red[self.current_idx] else "Left (Normal)"
             txt = (
                 f"MODE: SLIDESHOW   [{self.current_idx+1}/{len(self.actors)}]   "
-                f"({self.source})\n"
-                f"Subject: {name}   ({n_pts} pts)\n"
+                f"({self.source})   |   Side: {side_str}\n"
+                f"Group Mean: {name}   ({n_pts} pts)\n"
+                f"Vector Arrows: {v_state} (Scale: {self.arrow_scale:.2f}x)\n"
                 f"Bounds  X[{b[0]:+.3f},{b[1]:+.3f}]  "
-                f"Y[{b[2]:+.3f},{b[3]:+.3f}]  Z[{b[4]:+.3f},{b[5]:+.3f}]\n"
-                f"Mean shape: {mean_state}"
+                f"Y[{b[2]:+.3f},{b[3]:+.3f}]  Z[{b[4]:+.3f},{b[5]:+.3f}]"
             )
         self.text_actor.SetInput(txt)
 
     def reset_camera(self):
         cam = self.renderer.GetActiveCamera()
-        cam.SetPosition(0, -4, 0.8)
+        cam.SetPosition(0, -5, 1.2)
         cam.SetFocalPoint(0, 0, 0)
         cam.SetViewUp(0, 0, 1)
         self.renderer.ResetCamera()
@@ -507,8 +640,8 @@ class SpharmMeshViewer:
                 self.mode = self.MODE_SLIDESHOW
             self.current_idx = (self.current_idx - 1) % len(self.actors)
             self.apply_mode()
-        elif key == "m":
-            self.show_mean = not self.show_mean
+        elif key == "v":
+            self.show_vectors = not self.show_vectors
             self.apply_mode()
         elif key == "l":
             self.show_landmarks = not self.show_landmarks
@@ -516,7 +649,17 @@ class SpharmMeshViewer:
         elif key == "w":
             self.wireframe = not self.wireframe
             self.apply_mode()
-        elif key in ("plus", "equal", "kp_add"):
+        elif key in ("bracketright", "equal", "kp_add"):
+            self.arrow_scale *= 1.2
+            for g in self.glyphs:
+                g.SetScaleFactor(self.arrow_scale)
+            self.apply_mode()
+        elif key in ("bracketleft", "minus", "kp_subtract"):
+            self.arrow_scale /= 1.2
+            for g in self.glyphs:
+                g.SetScaleFactor(self.arrow_scale)
+            self.apply_mode()
+        elif key in ("plus", "equal", "kp_add") and not obj.GetShiftKey(): # Opacity if no bracket
             self.opacity_overlay = min(1.0, self.opacity_overlay + 0.05)
             self.apply_mode()
         elif key in ("minus", "underscore", "kp_subtract"):
@@ -531,11 +674,15 @@ class SpharmMeshViewer:
         if not self.meshes:
             return
         print("\n" + "=" * 56)
-        print("SPHARM MESH VIEWER")
+        print("SPHARM MEAN SHAPES SPLIT VIEWER (Vector Compare)")
         print(f"  Source:       {self.source}")
+        print("  Left side:    MEAN Normal shape (Blue, vectors point to diseased)")
+        print("  Right side:   MEAN Diseased shape (Red, vectors point to normal)")
         print("  Modes:        [1] Overlay   [2] Slideshow")
         print("  Slideshow:    [N/P/space/scroll/Right/Left]")
-        print("  Mean shape:   [M] toggle")
+        print("  Vectors:      [V] toggle vector arrows")
+        print("  Scale vector: [ ] ] increase size, [ [ ] decrease size")
+        print("  Landmarks:    [L] toggle")
         print("  Wireframe:    [W] toggle")
         print("  Opacity:      [+] / [-]  (overlay mode only)")
         print("  Camera:       [R] reset, drag mouse to rotate/pan/zoom")
@@ -577,7 +724,7 @@ def main():
         if os.path.isdir(candidate):
             spharm_dir = candidate
 
-    viewer = SpharmMeshViewer(spharm_dir)
+    viewer = SpharmMeanViewer(spharm_dir)
     viewer.start()
 
 
