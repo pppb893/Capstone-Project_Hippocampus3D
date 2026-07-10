@@ -154,17 +154,19 @@ def main():
             Y[i, 0] = 1.0
 
     # 4. Perform PLS-DA (PLSRegression with 3 components to support 3D visualization)
-    print("Running PLS-DA (PLSRegression with 3 components)...")
-    pls = PLSRegression(n_components=3)
+    print("Running PLS-DA (PLSRegression with 10 components)...")
+    pls = PLSRegression(n_components=10)
     X_scores, _ = pls.fit_transform(coef_vectors, Y)
 
     # 5. Save Scores to CSV
     scores_csv = os.path.join(plsda_dir, "plsda_scores.csv")
     with open(scores_csv, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["Subject", "PLS-DA 1", "PLS-DA 2", "PLS-DA 3", "Group", "Class"])
+        header = ["Subject"] + [f"PLS-DA {k}" for k in range(1, 11)] + ["Group", "Class"]
+        writer.writerow(header)
         for i in range(N):
-            writer.writerow([subject_names[i], f"{X_scores[i,0]:.8f}", f"{X_scores[i,1]:.8f}", f"{X_scores[i,2]:.8f}", groups[i], classes[i]])
+            scores_row = [subject_names[i]] + [f"{X_scores[i,j]:.8f}" for j in range(10)] + [groups[i], classes[i]]
+            writer.writerow(scores_row)
     print(f"Saved PLS-DA scores to: {scores_csv}")
 
     # 6. Plot PLS-DA
