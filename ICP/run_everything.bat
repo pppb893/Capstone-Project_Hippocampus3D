@@ -117,8 +117,8 @@ REM Python step เช็ค ERRORLEVEL ปกติ
 REM ============================================================
 
 title Pipeline [1/5]: ICP Alignment (%FOLDER_NAME%)
-echo [1/5] Running Group-wise ICP Alignment (main2.py)...
-"%SLICER_EXE%" --no-main-window --no-splash --python-script "%PIPELINE_DIR%\main2.py" --input_dir "%INPUT_DIR%" --output_dir "%OUTPUT_DIR%"
+echo [1/5] Running Group-wise ICP Alignment (ICP.py)...
+"%SLICER_EXE%" --no-main-window --no-splash --python-script "%PIPELINE_DIR%\ICP.py" --input_dir "%INPUT_DIR%" --output_dir "%OUTPUT_DIR%"
 if not exist "%OUTPUT_DIR%\aligned_nifti" (
     echo.
     echo [ERROR] Step 1 failed - 'aligned_nifti' folder not created.
@@ -213,6 +213,11 @@ if errorlevel 1 (
     exit /b 1
 )
 echo [OK] visualization complete.
+echo.
+
+title Pipeline Display: ICP Convergence Plot (%FOLDER_NAME%)
+echo Displaying ICP Convergence Time-Series Plot...
+"%USER_PYTHON%" "%PIPELINE_DIR%\plot_icp_convergence.py" --output_dir "%OUTPUT_DIR%" --show
 echo.
 
 echo ============================================================

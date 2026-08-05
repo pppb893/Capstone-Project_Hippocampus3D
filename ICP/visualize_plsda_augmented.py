@@ -52,19 +52,24 @@ def parse_coef(filename):
 # Group Classification
 # =============================================================================
 def classify_subject(subject_name):
-    is_left_side = subject_name.startswith("left_")
+    is_left_side = subject_name.startswith("left_") or subject_name.startswith("lh_") or "_lh" in subject_name.lower()
+    name_upper = subject_name.upper()
     
-    # 1. Healthy Control
-    if "_Healthy" in subject_name or "HFH_" in subject_name:
+    # 1. Healthy Control / Normal (0, royalblue)
+    if "_HEALTHY" in name_upper or "HEALTHY" in name_upper or "HFH_" in name_upper or "NORMAL" in name_upper:
         return "Healthy Control", 0, "royalblue"
     
-    # 2. Ipsilateral TLE (Diseased)
-    elif (is_left_side and "_Left-TLE" in subject_name) or (not is_left_side and "_Right-TLE" in subject_name):
+    # 2. Ipsilateral TLE (Diseased) (1, crimson)
+    elif (is_left_side and "LEFT-TLE" in name_upper) or (not is_left_side and "RIGHT-TLE" in name_upper):
         return "Ipsilateral TLE (Diseased)", 1, "crimson"
         
-    # 3. Contralateral TLE (Healthy-side)
-    elif (is_left_side and "_Right-TLE" in subject_name) or (not is_left_side and "_Left-TLE" in subject_name):
+    # 3. Contralateral TLE (Healthy-side) (2, royalblue)
+    elif (is_left_side and "RIGHT-TLE" in name_upper) or (not is_left_side and "LEFT-TLE" in name_upper):
         return "Contralateral TLE (Healthy-side)", 2, "royalblue"
+        
+    # 4. General TLE (1, crimson)
+    elif "TLE" in name_upper:
+        return "Ipsilateral TLE (Diseased)", 1, "crimson"
         
     return "Unknown", -1, "gray"
 
@@ -101,10 +106,10 @@ def main():
         else:
             output_root = chosen_abs
 
-    spharm_results_dir = os.path.join(output_root, "spharm_results")
-    if not os.path.exists(spharm_results_dir):
-        print(f"ERROR: spharm_results directory not found under output root: {output_root}")
-        return
+    if os.path.isdir(os.path.join(output_root, "spharm_results")):
+        spharm_results_dir = os.path.join(output_root, "spharm_results")
+    else:
+        spharm_results_dir = output_root
 
     # Find .coef files
     all_coef_files = sorted(glob.glob(os.path.join(spharm_results_dir, "*_SPHARM.coef")))

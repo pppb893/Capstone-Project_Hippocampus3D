@@ -86,17 +86,20 @@ def load_polydata_smoothed(filepath):
     reader.SetFileName(filepath)
     reader.Update()
     poly = reader.GetOutput()
-    if poly is None or poly.GetNumberOfPoints() == 0:
+    if poly is None or poly.GetNumberOfPoints() < 10 or poly.GetNumberOfCells() == 0:
         return None
-    normals = vtk.vtkPolyDataNormals()
-    normals.SetInputData(poly)
-    normals.ConsistencyOn()
-    normals.AutoOrientNormalsOn()
-    normals.SplittingOff()
-    normals.ComputePointNormalsOn()
-    normals.ComputeCellNormalsOff()
-    normals.Update()
-    return normals.GetOutput()
+    try:
+        normals = vtk.vtkPolyDataNormals()
+        normals.SetInputData(poly)
+        normals.ConsistencyOn()
+        normals.AutoOrientNormalsOn()
+        normals.SplittingOff()
+        normals.ComputePointNormalsOn()
+        normals.ComputeCellNormalsOff()
+        normals.Update()
+        return normals.GetOutput()
+    except Exception:
+        return poly
 
 
 # =============================================================================
@@ -213,13 +216,8 @@ class SpharmMeshViewer:
     def setup_vtk(self):
         self.renderer = vtk.vtkRenderer()
         self.renderer.SetBackground(0.07, 0.07, 0.1)
-        self.renderer.SetUseDepthPeeling(True)
-        self.renderer.SetMaximumNumberOfPeels(8)
-        self.renderer.SetOcclusionRatio(0.0)
 
         self.render_window = vtk.vtkRenderWindow()
-        self.render_window.SetAlphaBitPlanes(1)
-        self.render_window.SetMultiSamples(0)
         self.render_window.AddRenderer(self.renderer)
         self.render_window.SetSize(1300, 950)
         self.render_window.SetWindowName(
@@ -312,16 +310,20 @@ class SpharmMeshViewer:
             
             # Classify by name to match scatter plot coloring (Red/Blue only)
             name = self.basenames[i]
-            is_left_side = name.startswith("left_")
-            if "_Healthy" in name or "HFH_" in name:
-                r, g, b = (0.2549, 0.4118, 0.8824)  # royalblue (blue)
+            is_left_side = name.startswith("left_") or name.startswith("lh_") or "_lh" in name.lower()
+            name_upper = name.upper()
+            if "_HEALTHY" in name_upper or "HEALTHY" in name_upper or "HFH_" in name_upper or "NORMAL" in name_upper:
+                r, g, b = (0.2549, 0.4118, 0.8824)  # royalblue (blue = Normal)
                 is_red = False
-            elif (is_left_side and "_Left-TLE" in name) or (not is_left_side and "_Right-TLE" in name):
-                r, g, b = (0.8627, 0.0784, 0.2353)  # crimson (red)
+            elif (is_left_side and "LEFT-TLE" in name_upper) or (not is_left_side and "RIGHT-TLE" in name_upper):
+                r, g, b = (0.8627, 0.0784, 0.2353)  # crimson (red = TLE)
                 is_red = True
-            elif (is_left_side and "_Right-TLE" in name) or (not is_left_side and "_Left-TLE" in name):
+            elif (is_left_side and "RIGHT-TLE" in name_upper) or (not is_left_side and "LEFT-TLE" in name_upper):
                 r, g, b = (0.2549, 0.4118, 0.8824)  # royalblue (blue)
                 is_red = False
+            elif "TLE" in name_upper:
+                r, g, b = (0.8627, 0.0784, 0.2353)  # crimson (red = TLE)
+                is_red = True
             else:
                 r, g, b = (0.5, 0.5, 0.5)            # gray
                 is_red = False
@@ -364,27 +366,13 @@ class SpharmMeshViewer:
         self.landmark_actors_per_subject = []
         sphere_radius = self._estimate_landmark_dot_radius()
         landmark_colors = [
-            (1.0, 0.25, 0.25),   # head  - red
-            (0.25, 0.45, 1.0),   # tail  - blue
-            (0.3,  1.0,  0.3),   # lat   - green
-            (1.0,  1.0,  0.3),   # med   - yellow
+            (1.0, 0.25, 0.25),   # head 470 - red (+Z)
+            (0.25, 0.45, 1.0),   # tail 276 - blue (-Z)
+            (1.0,  1.0,  0.3),   # index 0  - yellow (-X)
+            (0.3,  1.0,  0.3),   # opp 0    - green (+X)
         ]
         
-        # Determine fixed vertex indices from the template shape to ensure correspondence visualization
-        use_fixed_indices = (self.source in ("pca_ready", "realigned", "procalign") or "procalign" in self.source)
-        fixed_indices = None
-        if use_fixed_indices and len(self.meshes) > 0:
-            ref_pts = poly_points_numpy(self.meshes[0])
-            try:
-                # First try positional detection since it's aligned
-                fixed_indices = find_landmarks_by_position(ref_pts)
-            except Exception:
-                try:
-                    fixed_indices = find_anatomical_landmarks(ref_pts)
-                except Exception:
-                    use_fixed_indices = False
-
-        use_positional = self.source == "realigned"
+        fixed_indices = (470, 276, 0, 272)
         for i, poly in enumerate(self.meshes):
             name = self.basenames[i]
             is_left_side = name.startswith("left_")
@@ -401,16 +389,11 @@ class SpharmMeshViewer:
             
             pts = poly_points_numpy(poly)
             try:
-                if use_fixed_indices and fixed_indices is not None:
-                    h, t, l, m = fixed_indices
-                elif use_positional:
-                    h, t, l, m = find_landmarks_by_position(pts)
-                else:
-                    h, t, l, m = find_anatomical_landmarks(pts)
+                r_idx, b_idx, y_idx, g_idx = fixed_indices
+                positions = [pts[r_idx], pts[b_idx], pts[y_idx], pts[g_idx]]
             except Exception:
                 self.landmark_actors_per_subject.append([])
                 continue
-            positions = [pts[h], pts[t], pts[l], pts[m]]
             subject_actors = []
             for color, pos in zip(landmark_colors, positions):
                 sphere = vtk.vtkSphereSource()

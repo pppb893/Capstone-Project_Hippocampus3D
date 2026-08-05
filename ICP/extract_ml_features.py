@@ -25,19 +25,24 @@ def prompt_folder(title):
 # Group Classification
 # =============================================================================
 def classify_subject(subject_name):
-    is_left_side = subject_name.startswith("left_")
+    is_left_side = subject_name.startswith("left_") or subject_name.startswith("lh_") or "_lh" in subject_name.lower()
+    name_upper = subject_name.upper()
     
-    # 1. Healthy Control (0)
-    if "_Healthy" in subject_name or "HFH_" in subject_name:
+    # 1. Healthy Control / Normal (0)
+    if "_HEALTHY" in name_upper or "HEALTHY" in name_upper or "HFH_" in name_upper or "NORMAL" in name_upper:
         return "Healthy Control", 0
     
     # 2. Ipsilateral TLE (Diseased) (1)
-    elif (is_left_side and "_Left-TLE" in subject_name) or (not is_left_side and "_Right-TLE" in subject_name):
+    elif (is_left_side and "LEFT-TLE" in name_upper) or (not is_left_side and "RIGHT-TLE" in name_upper):
         return "Ipsilateral TLE (Diseased)", 1
         
     # 3. Contralateral TLE (Healthy-side) (2)
-    elif (is_left_side and "_Right-TLE" in subject_name) or (not is_left_side and "_Left-TLE" in subject_name):
+    elif (is_left_side and "RIGHT-TLE" in name_upper) or (not is_left_side and "LEFT-TLE" in name_upper):
         return "Contralateral TLE (Healthy-side)", 2
+        
+    # 4. General TLE (1)
+    elif "TLE" in name_upper:
+        return "Ipsilateral TLE (Diseased)", 1
         
     return "Unknown", -1
 
@@ -80,6 +85,9 @@ def main():
     if not vtk_files:
         vtk_files = sorted(glob.glob(os.path.join(spharm_dir, "*_SPHARM_ellalign.vtk")))
         source = "ellalign"
+    if not vtk_files:
+        vtk_files = sorted([f for f in glob.glob(os.path.join(spharm_dir, "*.vtk")) if not f.endswith("_grid.vtk")])
+        source = "vtk"
 
     if not vtk_files:
         print(f"Error: No aligned SPHARM .vtk files found in {spharm_dir}")

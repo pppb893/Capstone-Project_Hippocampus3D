@@ -20,7 +20,7 @@ def _bootstrap_slicer():
     )
     if not os.path.exists(slicer_exe):
         print(f"[ERROR] SlicerSALT not found at: {slicer_exe}")
-        print("        Set env var SLICER_EXE or edit the default path in main2.py")
+        print("        Set env var SLICER_EXE or edit the default path in ICP.py")
         sys.exit(1)
 
     import subprocess
@@ -319,7 +319,9 @@ def compute_mean_poly(meshes):
 # convergence threshold = 0.01 mm (เหมาะกับ physical scale ของ hippocampus)
 # =============================================================================
 
-def run_vtk_icp(source_poly, target_poly):
+EVAL_PAIRWISE_STEPS = [1, 2, 3, 5, 8, 10, 15, 20, 25, 30]
+
+def run_vtk_icp(source_poly, target_poly, return_history=False):
     icp = vtk.vtkIterativeClosestPointTransform()
     icp.SetSource(source_poly)
     icp.SetTarget(target_poly)
@@ -333,7 +335,23 @@ def run_vtk_icp(source_poly, target_poly):
     for r in range(4):
         for c in range(4):
             res[r, c] = matrix.GetElement(r, c)
-    return res
+
+    if not return_history:
+        return res
+
+    history = []
+    for k in EVAL_PAIRWISE_STEPS:
+        icp_k = vtk.vtkIterativeClosestPointTransform()
+        icp_k.SetSource(source_poly)
+        icp_k.SetTarget(target_poly)
+        icp_k.GetLandmarkTransform().SetModeToRigidBody()
+        icp_k.SetMaximumNumberOfIterations(k)
+        icp_k.SetMaximumMeanDistance(0.0001)
+        icp_k.CheckMeanDistanceOn()
+        icp_k.Update()
+        history.append(float(icp_k.GetMeanDistance()))
+
+    return res, history
 
 
 # =============================================================================
@@ -410,7 +428,7 @@ OUTPUT_VOXELS = 128
 
 
 def main():
-    sprint("--- main2.py STARTING (rigid groupwise ICP) ---")
+    sprint("--- ICP.py STARTING (rigid groupwise ICP) ---")
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_dir", default=None)
@@ -441,6 +459,16 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     sprint(f"Input  dir: {input_dir}")
     sprint(f"Output dir: {output_dir}")
+
+    # ลบประวัติและรูปภาพเดิม (ถ้ามี) เพื่อให้แน่ใจว่าบันทึกใหม่สดเสมอ
+    for old_file in ["icp_convergence_history.json", "icp_convergence.png"]:
+        old_path = os.path.join(output_dir, old_file)
+        if os.path.exists(old_path):
+            try:
+                os.remove(old_path)
+                sprint(f"  Cleaned up old output file: {old_file}")
+            except Exception as e:
+                pass
 
     extensions = ["*.nii.gz", "*.nii", "*.hdr", "*.nrrd"]
     file_list = []
@@ -542,15 +570,28 @@ def main():
     # ----------------------------------------------------------------
     # STEP 4: Groupwise ICP (rigid)
     # แต่ละรอบ: re-check orientation -> mean shape -> ICP to mean
-    # ICP rigid (rotation+translation) ไม่สามารถ flip mesh ได้
-    # -> ตรวจ orientation เฉพาะก่อนคำนวณ mean (pre-mean) ก็พอ
+    # ทำซ้ำจนกว่าความเปลี่ยนแปลงของระยะห่างเฉลี่ยจะไม่เกิน 0.001 (หรือครบ MAX_GW_ITERATIONS)
     # ----------------------------------------------------------------
-    sprint("Step 4: Groupwise ICP (rigid, 5 rounds)...")
+    MAX_GW_ITERATIONS = 20
+    GW_TOLERANCE = 0.00005
+    sprint(f"Step 4: Groupwise ICP (rigid, max {MAX_GW_ITERATIONS} rounds, tolerance={GW_TOLERANCE})...")
     T_icp = [np.eye(4) for _ in range(N)]
-    NUM_GW_ITERATIONS = 5
+    prev_mean_dist = float("inf")
 
-    for gw_iter in range(NUM_GW_ITERATIONS):
-        sprint(f"  [Groupwise Round {gw_iter+1}/{NUM_GW_ITERATIONS}]")
+    import time
+    gw_start_time = time.time()
+
+    gw_history = {
+        "rounds": [],
+        "elapsed_times_sec": [],
+        "mean_distances": [],
+        "dist_changes": [],
+        "subject_names": [os.path.basename(f) for f in file_list],
+        "subject_distances": {os.path.basename(f): [] for f in file_list}
+    }
+
+    for gw_iter in range(MAX_GW_ITERATIONS):
+        sprint(f"  [Groupwise Round {gw_iter+1}/{MAX_GW_ITERATIONS}]")
 
         sprint(f"  [Round {gw_iter+1}] Pre-mean orientation re-check...")
         for i in range(1, N):
@@ -563,13 +604,40 @@ def main():
 
         ref_mean = compute_mean_poly(aligned_meshes)
 
+        pairwise_histories = []
+        subj_pw_dict = {}
         for i in range(N):
-            dT = run_vtk_icp(aligned_meshes[i], ref_mean)
+            dT, p_hist = run_vtk_icp(aligned_meshes[i], ref_mean, return_history=True)
             aligned_meshes[i] = apply_poly_transform(aligned_meshes[i], dT)
             T_icp[i] = dT @ T_icp[i]
+            pairwise_histories.append(p_hist)
+            bname = os.path.basename(file_list[i])
+            subj_pw_dict[bname] = [float(v) for v in p_hist]
 
-        total_d = sum(icp_distance(aligned_meshes[i], ref_mean) for i in range(N))
-        sprint(f"  [Round {gw_iter+1}] Mean ICP dist to template: {total_d/N:.6f}")
+        if gw_iter == 0:
+            avg_pairwise = np.mean(pairwise_histories, axis=0).tolist()
+            gw_history["pairwise_iterations"] = EVAL_PAIRWISE_STEPS
+            gw_history["mean_pairwise_distances"] = [float(v) for v in avg_pairwise]
+            gw_history["subject_pairwise_distances"] = subj_pw_dict
+
+        subj_dists = [icp_distance(aligned_meshes[i], ref_mean) for i in range(N)]
+        current_mean_dist = sum(subj_dists) / N
+        sprint(f"  [Round {gw_iter+1}] Mean ICP dist to template: {current_mean_dist:.6f}")
+
+        dist_change = abs(prev_mean_dist - current_mean_dist) if prev_mean_dist != float("inf") else 0.0
+        t_elapsed = round(time.time() - gw_start_time, 2)
+        gw_history["rounds"].append(gw_iter + 1)
+        gw_history["elapsed_times_sec"].append(t_elapsed)
+        gw_history["mean_distances"].append(float(current_mean_dist))
+        gw_history["dist_changes"].append(float(dist_change))
+        for i, f in enumerate(file_list):
+            bname = os.path.basename(f)
+            gw_history["subject_distances"][bname].append(float(subj_dists[i]))
+
+        if gw_iter > 0 and dist_change <= GW_TOLERANCE:
+            sprint(f"  --> Groupwise ICP CONVERGED at round {gw_iter+1} (change: {dist_change:.6f} <= {GW_TOLERANCE})")
+            break
+        prev_mean_dist = current_mean_dist
 
     sprint("Step 5: Global bounding-box normalization (preserving relative physical sizes)...")
     
@@ -640,6 +708,12 @@ def main():
     np.save(os.path.join(output_dir, "T_matrices.npy"), np.array(T_matrices))
     sprint(f"  Saved T_matrices.npy ({N} matrices)")
 
+    import json
+    history_json_path = os.path.join(output_dir, "icp_convergence_history.json")
+    with open(history_json_path, "w") as f:
+        json.dump(gw_history, f, indent=2)
+    sprint(f"  Saved icp_convergence_history.json")
+
     mean_poly = compute_mean_poly(aligned_meshes)
     writer = vtk.vtkPLYWriter()
     writer.SetFileName(os.path.join(output_dir, "mean_shape.ply"))
@@ -652,7 +726,7 @@ def main():
                          n_voxels=OUTPUT_VOXELS)
 
     sprint(f"  All {N} aligned NIfTI saved to: {os.path.join(output_dir, 'aligned_nifti')}")
-    sprint("--- main2.py FINISHED ---")
+    sprint("--- ICP.py FINISHED ---")
 
 
 # =============================================================================

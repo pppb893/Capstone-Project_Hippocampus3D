@@ -53,19 +53,24 @@ def parse_coef(filename):
 # Group Classification
 # =============================================================================
 def classify_subject(subject_name):
-    is_left_side = subject_name.startswith("left_")
+    is_left_side = subject_name.startswith("left_") or subject_name.startswith("lh_") or "_lh" in subject_name.lower()
+    name_upper = subject_name.upper()
     
-    # 1. Healthy Control (royalblue)
-    if "_Healthy" in subject_name or "HFH_" in subject_name:
+    # 1. Healthy Control / Normal (royalblue, 0)
+    if "_HEALTHY" in name_upper or "HEALTHY" in name_upper or "HFH_" in name_upper or "NORMAL" in name_upper:
         return "Healthy Control", "royalblue", 0
     
-    # 2. Ipsilateral TLE (Diseased) (crimson)
-    elif (is_left_side and "_Left-TLE" in subject_name) or (not is_left_side and "_Right-TLE" in subject_name):
+    # 2. Ipsilateral TLE (Diseased) (crimson, 1)
+    elif (is_left_side and "LEFT-TLE" in name_upper) or (not is_left_side and "RIGHT-TLE" in name_upper):
         return "Ipsilateral TLE (Diseased)", "crimson", 1
         
-    # 3. Contralateral TLE (Healthy-side) (royalblue)
-    elif (is_left_side and "_Right-TLE" in subject_name) or (not is_left_side and "_Left-TLE" in subject_name):
+    # 3. Contralateral TLE (Healthy-side) (royalblue, 2)
+    elif (is_left_side and "RIGHT-TLE" in name_upper) or (not is_left_side and "LEFT-TLE" in name_upper):
         return "Contralateral TLE (Healthy-side)", "royalblue", 2
+        
+    # 4. General TLE (crimson, 1)
+    elif "TLE" in name_upper:
+        return "Ipsilateral TLE (Diseased)", "crimson", 1
         
     return "Unknown", "gray", -1
 
@@ -88,7 +93,10 @@ def main():
         else:
             output_root = os.path.abspath(chosen)
 
-    spharm_results_dir = os.path.join(output_root, "spharm_results")
+    if os.path.isdir(os.path.join(output_root, "spharm_results")):
+        spharm_results_dir = os.path.join(output_root, "spharm_results")
+    else:
+        spharm_results_dir = output_root
     plsda_dir = os.path.join(output_root, "plsda_results")
     if not os.path.exists(plsda_dir):
         os.makedirs(plsda_dir)
@@ -116,7 +124,22 @@ def main():
     colors = []
     classes = []
     L = None
+    expected_len = None
 
+    # First pass: find the first file with a valid number of coefficients (len >= 9) to determine L and expected_len
+    for fpath in coef_files:
+        coeffs = parse_coef(fpath)
+        if coeffs and len(coeffs) >= 9:
+            expected_len = len(coeffs)
+            L = int(np.sqrt(expected_len)) - 1
+            print(f"Detected SPHARM degree L = {L} (number of coefficients = {expected_len})")
+            break
+
+    if expected_len is None:
+        print("ERROR: No valid coefficient files found (all are empty or too small).")
+        return
+
+    # Second pass: read and parse all files, skipping those with mismatched coefficient lengths
     for fpath in coef_files:
         basename = os.path.basename(fpath)
         subject_name = basename.replace("_SPHARM.coef", "")
@@ -125,9 +148,9 @@ def main():
         if not coeffs:
             continue
             
-        if L is None:
-            L = int(np.sqrt(len(coeffs))) - 1
-            print(f"Detected SPHARM degree L = {L} (number of coefficients = {len(coeffs)})")
+        if len(coeffs) != expected_len:
+            print(f"WARNING: Skipping {basename} - got {len(coeffs)} coefficients, expected {expected_len}")
+            continue
             
         flat_coeffs = np.array(coeffs).ravel()
         coef_vectors.append(flat_coeffs)

@@ -240,8 +240,8 @@ def find_anatomical_landmarks(pts):
 # Main
 # =============================================================================
 
-# canonical positions ที่ landmarks ควรไปอยู่ (ทุก subject ปลายทางเหมือนกัน)
-CANONICAL = np.array([
+# 4 canonical positions: HEAD (+Z), TAIL (-Z), LATERAL (+X), MEDIAL (-X)
+CANONICAL_4PTS = np.array([
     [0.0, 0.0, +1.0],   # HEAD    -> +Z
     [0.0, 0.0, -1.0],   # TAIL    -> -Z
     [+1.0, 0.0, 0.0],   # LATERAL -> +X
@@ -251,7 +251,7 @@ CANONICAL = np.array([
 
 def main():
     print("=" * 72)
-    print("--- Anatomical Landmark Re-alignment ---")
+    print("--- 4-Point Anatomical Template Re-alignment ---")
     print("=" * 72)
 
     parser = argparse.ArgumentParser()
@@ -282,41 +282,36 @@ def main():
             except Exception as e:
                 print(f"  Failed to delete {os.path.basename(f)}: {e}")
 
-    # ลำดับ preference (สูง -> ต่ำ):
-    #   1. *_SPHARM_procalign.vtk   (template-aligned; consistent correspondences ระหว่าง
-    #                                subjects -> PCA สะอาด)
-    #   2. *_SPHARM.vtk            (raw SlicerSALT output; should have template alignment)
-    #   3. *_SPHARM_ellalign.vtk    (ellipsoid-aligned; correspondences ตรงกันใน "subject เดียว"
-    #                                แต่ระหว่าง subjects มี sign-flip ambiguity)
-    # ใน SlicerSALT 6.0.0 ผลลัพธ์สุดท้ายที่ผ่านการทำ Template alignment จะถูกเซฟเป็น _SPHARM.vtk
-    # ดังนั้นเราต้องโหลด _SPHARM.vtk ซึ่งมี vertex correspondence ระหว่าง subjects
     all_spharm = sorted(glob.glob(os.path.join(folder, "*_SPHARM.vtk")))
     candidate_files = [f for f in all_spharm
                        if not any(s in os.path.basename(f)
                                   for s in ("_ellalign", "_grid", "_realigned", "_procalign", "_pca_ready"))]
-    source = "_SPHARM.vtk (SlicerSALT template-aligned final output)"
+    source = "_SPHARM.vtk"
 
-    # Fallback สุดท้ายถ้าไม่มี _SPHARM.vtk
     if not candidate_files:
         candidate_files = sorted(glob.glob(os.path.join(folder, "*_SPHARM_ellalign.vtk")))
-        source = "_SPHARM_ellalign.vtk (WARNING: No vertex correspondence)"
+        source = "_SPHARM_ellalign.vtk"
+
+    if not candidate_files:
+        all_vtk = sorted(glob.glob(os.path.join(folder, "*.vtk")))
+        candidate_files = [f for f in all_vtk
+                           if not any(s in os.path.basename(f)
+                                      for s in ("_realigned.vtk", "_pca_ready.vtk"))]
+        source = ".vtk"
 
     if not candidate_files:
         print(f"[ERROR] No SPHARM .vtk found in {folder}")
         sys.exit(1)
 
-    # Filter files: If a subject has both '_aligned' and non-aligned files, keep only the '_aligned' one.
     filtered_files = {}
     for f in candidate_files:
         basename = os.path.basename(f)
-        # Strip suffix to get name
         name = basename
         for suffix in ("_SPHARM.vtk", "_SPHARM_ellalign.vtk"):
             if name.endswith(suffix):
                 name = name[:-len(suffix)]
                 break
         
-        # subject key is name with '_aligned' removed
         if name.endswith("_aligned"):
             subj_key = name[:-len("_aligned")]
             is_aligned = True
@@ -324,7 +319,6 @@ def main():
             subj_key = name
             is_aligned = False
             
-        # If this subject key is not seen, or if this file is aligned while the stored one is not, keep this one
         if subj_key not in filtered_files:
             filtered_files[subj_key] = (f, is_aligned)
         else:
@@ -336,15 +330,7 @@ def main():
 
     print(f"\nSource: {source}")
     print(f"Found {len(files)} meshes\n")
-    print(f"Canonical orientation:")
-    print(f"  HEAD    -> (0, 0, +1)  (+Z 'เหนือ')")
-    print(f"  TAIL    -> (0, 0, -1)  (-Z 'ใต้')")
-    print(f"  LATERAL -> (+1, 0, 0)  (+X 'ออก')")
-    print(f"  MEDIAL  -> (-1, 0, 0)  (-X 'ตก')")
-    print()
 
-    # ---------- Phase 1: Load subjects and compute group mean shape ----------
-    print(f"Phase 1: Loading subjects and computing group mean shape...")
     subjects = []
     skipped = 0
     for f in files:
@@ -364,45 +350,30 @@ def main():
         print("[ERROR] No subjects to align.")
         return
 
-    # Compute the average coordinates of all vertices across all subjects
-    # (Since SPHARM-PDM templates align meshes, vertex indices have 1-to-1 correspondence)
-    mean_pts = np.mean([s["pts"] for s in subjects], axis=0)
+    # Fixed topological landmark indices across SPHARM mesh topology:
+    # RED = Head (470, +Z), BLUE = Tail (276, -Z), YELLOW = Index 0 (0, +X), GREEN = Opposite 0 (272, -X)
+    h_idx, t_idx, y_idx, g_idx = 470, 276, 0, 272
+    print(f"Phase 1: Aligning reference template subject to canonical orientation...")
+    ref_pts = subjects[0]["pts"]
+    lm_ref = ref_pts[[h_idx, t_idx, y_idx, g_idx]]
+    size_ref = float(np.linalg.norm(lm_ref - lm_ref.mean(axis=0), axis=1).mean())
+    R_ref, t_ref = kabsch_proper(lm_ref, CANONICAL_4PTS * size_ref)
+    aligned_ref_pts = (R_ref @ ref_pts.T).T + t_ref
 
-    # ---------- Phase 2: Detect landmarks on the template shape ----------
-    print(f"\nPhase 2: Detecting anatomical landmarks on the template mesh (first subject)...")
-    template_pts = subjects[0]["pts"]
-    h_idx, t_idx, l_idx, m_idx = find_anatomical_landmarks(template_pts)
-    print(f"  Detected landmark indices on template: HEAD={h_idx}, TAIL={t_idx}, LATERAL={l_idx}, MEDIAL={m_idx}")
-    mean_lm = mean_pts[[h_idx, t_idx, l_idx, m_idx]]
-
-    # ---------- Phase 3: Compute single global rotation to canonical frame ----------
-    print(f"\nPhase 3: Computing single global transformation to canonical orientation...")
-    size = float(np.linalg.norm(mean_lm - mean_lm.mean(axis=0), axis=1).mean())
-    canonical_scaled = CANONICAL * size
-    
-    # Calculate group-wide rotation/translation mapping the mean landmarks to canonical
-    R_group, t_group = kabsch_proper(mean_lm, canonical_scaled)
-    print(f"  Group rotation angle: "
-          f"{np.degrees(np.arccos(np.clip((np.trace(R_group)-1)/2, -1, 1))):.2f} deg")
-
-    # ---------- Phase 4: Apply global rotation to all subjects ----------
-    print(f"\nPhase 4: Applying identical global transformation to all subjects...")
-    aligned_pts_list = []
-    for s in subjects:
-        # We apply the same rigid transformation to all subjects to preserve alignment and correspondence
-        aligned_pts = (R_group @ s["pts"].T).T + t_group
-        aligned_pts_list.append(aligned_pts)
-
-    # ---------- Phase 5: Write output + report ----------
-    print(f"\nPhase 5: Writing output...")
-    print(f"{'Subject':<48} {'resid':>10}")
+    print(f"Phase 2: Re-aligning all subjects to canonical template using full-topology Kabsch alignment...")
+    print(f"\n{'Subject':<48} {'resid':>10}")
     print("-" * 60)
 
     final_landmarks = []
-    for i, s in enumerate(subjects):
-        new_pts = aligned_pts_list[i]
-        new_lm = new_pts[[h_idx, t_idx, l_idx, m_idx]]
-        residual = float(np.linalg.norm(new_lm - canonical_scaled, axis=1).mean())
+    for s in subjects:
+        pts = s["pts"]
+        # Full 1002-point Kabsch rigid transformation against aligned reference template
+        R, t = kabsch_proper(pts, aligned_ref_pts)
+        new_pts = (R @ pts.T).T + t
+
+        new_lm = new_pts[[h_idx, t_idx, y_idx, g_idx]]
+        target_ref_lm = aligned_ref_pts[[h_idx, t_idx, y_idx, g_idx]]
+        residual = float(np.linalg.norm(new_lm - target_ref_lm, axis=1).mean())
         final_landmarks.append(new_lm)
 
         out_poly = replace_points(s["poly"], new_pts)
@@ -412,7 +383,6 @@ def main():
                 base = base[: -len(suf)]
                 break
         
-        # Save both realigned and pca_ready
         out_path_realigned = base + "_SPHARM_realigned.vtk"
         out_path_pca_ready = base + "_SPHARM_pca_ready.vtk"
         write_polydata(out_poly, out_path_realigned)
@@ -423,46 +393,18 @@ def main():
             name = name.replace(suf, "")
         print(f"  {name:<46} {residual:>10.5f}")
 
-    final_landmarks = np.array(final_landmarks)  # (N, 4, 3)
-
-    # Check for abnormally high residuals
-    max_resid = np.linalg.norm(final_landmarks - canonical_scaled, axis=2).mean(axis=1).max()
-    if max_resid > 5.0:
-        print("\n" + "!" * 72)
-        print("WARNING: LANDMARK RE-ALIGNMENT RESIDUAL IS ABNORMALLY HIGH!")
-        print(f"Maximum subject residual is {max_resid:.4f} (expected < 1.0).")
-        print("This usually indicates that the input directory contains a mix of")
-        print("unaligned and aligned meshes, or shapes with different spatial coordinate systems.")
-        print("Please check and clean your input directory before running.")
-        print("!" * 72 + "\n")
-
-    # Position-based landmarks
-    position_landmarks = []
-    for i, _ in enumerate(subjects):
-        pts = aligned_pts_list[i]
-        h_pos_idx = int(np.argmax(pts[:, 2]))
-        t_pos_idx = int(np.argmin(pts[:, 2]))
-        l_pos_idx = int(np.argmax(pts[:, 0]))
-        m_pos_idx = int(np.argmin(pts[:, 0]))
-        position_landmarks.append(pts[[h_pos_idx, t_pos_idx, l_pos_idx, m_pos_idx]])
-    position_landmarks = np.array(position_landmarks)  # (N, 4, 3)
+    final_landmarks = np.array(final_landmarks)
 
     print()
     print("=" * 72)
-    print(f"Done. Processed {len(subjects)} subjects.")
-    print(f"\nLandmark clustering quality (Phase-2 detected indices):")
-    for k, name in enumerate(["HEAD", "TAIL", "LAT ", "MED "]):
+    print(f"Done. Re-aligned {len(subjects)} subjects using 4-point anatomical alignment.")
+    print(f"\nLandmark clustering quality after realignment:")
+    for k, name in enumerate(["HEAD (RED)", "TAIL (BLUE)", "LAT (GREEN)", "MED (YELLOW)"]):
         cluster_pts = final_landmarks[:, k, :]
         spread = float(np.linalg.norm(cluster_pts - cluster_pts.mean(axis=0),
                                       axis=1).mean())
         print(f"    {name}: mean distance from cluster center = {spread:.4f}")
-    print(f"\nLandmark clustering quality (position-based, matches viewer):")
-    for k, name in enumerate(["HEAD", "TAIL", "LAT ", "MED "]):
-        cluster_pts = position_landmarks[:, k, :]
-        spread = float(np.linalg.norm(cluster_pts - cluster_pts.mean(axis=0),
-                                      axis=1).mean())
-        print(f"    {name}: mean distance from cluster center = {spread:.4f}")
-    print(f"\nOutput: *_SPHARM_realigned.vtk and *_SPHARM_pca_ready.vtk in {folder}")
+    print(f"\nOutput saved as *_SPHARM_realigned.vtk in {folder}")
     print("=" * 72)
 
 

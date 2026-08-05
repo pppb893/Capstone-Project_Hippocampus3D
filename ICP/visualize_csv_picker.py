@@ -90,19 +90,24 @@ def main():
 
     # Classify subjects into 3 categories
     def classify_subject(subject_name):
-        is_left_side = subject_name.startswith("left_")
+        is_left_side = subject_name.startswith("left_") or subject_name.startswith("lh_") or "_lh" in subject_name.lower()
+        name_upper = subject_name.upper()
         
-        # 1. Healthy Control
-        if "_Healthy" in subject_name or "HFH_" in subject_name:
+        # 1. Healthy Control / Normal
+        if "_HEALTHY" in name_upper or "HEALTHY" in name_upper or "HFH_" in name_upper or "NORMAL" in name_upper:
             return "Healthy Control", "royalblue"
         
         # 2. Ipsilateral TLE (Diseased)
-        elif (is_left_side and "_Left-TLE" in subject_name) or (not is_left_side and "_Right-TLE" in subject_name):
+        elif (is_left_side and "LEFT-TLE" in name_upper) or (not is_left_side and "RIGHT-TLE" in name_upper):
             return "Ipsilateral TLE (Diseased)", "crimson"
             
         # 3. Contralateral TLE (Healthy-side)
-        elif (is_left_side and "_Right-TLE" in subject_name) or (not is_left_side and "_Left-TLE" in subject_name):
+        elif (is_left_side and "RIGHT-TLE" in name_upper) or (not is_left_side and "LEFT-TLE" in name_upper):
             return "Contralateral TLE (Healthy-side)", "royalblue"
+            
+        # 4. General TLE
+        elif "TLE" in name_upper:
+            return "Ipsilateral TLE (Diseased)", "crimson"
             
         return "Unknown", "gray"
 

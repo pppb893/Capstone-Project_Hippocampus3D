@@ -61,11 +61,11 @@ def cleanup_subject_files(output_base_dir, basename):
 def run_cli_checked(module, params, step_name, log_file):
     """
     รัน CLI module แล้วตรวจ status จริง ๆ
-    return True ถ้า status == 'Completed', False ถ้าไม่ใช่
+    return True ถ้า status == 'Completed' หรือ 'Completed with errors', False ถ้าไม่ใช่
     """
     cli_node = slicer.cli.run(module, None, params, wait_for_completion=True)
     status = cli_node.GetStatusString()
-    if status != "Completed":
+    if status not in ("Completed", "Completed with errors"):
         sprint(f"    !!! CLI '{step_name}' status = {status}", log_file)
         err = cli_node.GetErrorText() or ""
         out = cli_node.GetOutputText() or ""
@@ -377,7 +377,21 @@ def run_batch_spharm():
             # (SPHARM CLI often writes warnings to stderr, which Slicer marks as Completed with errors)
             if not (os.path.exists(own_spharm_path) and os.path.exists(own_spharm_path.replace(".vtk", ".coef"))):
                 sprint(f"  - ERROR: SPHARM outputs not found for {basename}", log_file)
+                cleanup_subject_files(output_base_dir, basename)
                 continue
+
+            # Verify VTK validity (check for 0 cells or NaN corrupted files)
+            try:
+                reader = vtk.vtkPolyDataReader()
+                reader.SetFileName(own_spharm_path)
+                reader.Update()
+                poly = reader.GetOutput()
+                if poly is None or poly.GetNumberOfPoints() < 10 or poly.GetNumberOfCells() == 0:
+                    sprint(f"  - ERROR: Invalid/Corrupted SPHARM output (0 cells / NaN) for {basename}", log_file)
+                    cleanup_subject_files(output_base_dir, basename)
+                    continue
+            except Exception:
+                pass
 
             # ถ้าเป็น template subject -> copy ellalign เป็น procalign เพื่อให้ pipeline uniform
             # (subjects อื่น จะมี _procalign.vtk สำหรับ subject นี้ก็ต้องมีด้วย ใช้ ellalign ของตัวเอง)

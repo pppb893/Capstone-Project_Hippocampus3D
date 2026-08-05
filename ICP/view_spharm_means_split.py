@@ -477,41 +477,24 @@ class SpharmMeanViewer:
         self.landmark_actors_per_subject = []
         sphere_radius = self._estimate_landmark_dot_radius()
         landmark_colors = [
-            (1.0, 0.25, 0.25),   # head  - red
-            (0.25, 0.45, 1.0),   # tail  - blue
-            (0.3,  1.0,  0.3),   # lat   - green
-            (1.0,  1.0,  0.3),   # med   - yellow
+            (1.0, 0.25, 0.25),   # head 470 - red (+Z)
+            (0.25, 0.45, 1.0),   # tail 276 - blue (-Z)
+            (1.0,  1.0,  0.3),   # index 0  - yellow (-X)
+            (0.3,  1.0,  0.3),   # opp 0    - green (+X)
         ]
         
-        use_fixed_indices = (self.source in ("pca_ready", "realigned", "procalign") or "procalign" in self.source)
-        fixed_indices = None
-        if use_fixed_indices and len(self.meshes) > 0:
-            ref_pts = poly_points_numpy(self.meshes[0])
-            try:
-                fixed_indices = find_landmarks_by_position(ref_pts)
-            except Exception:
-                try:
-                    fixed_indices = find_anatomical_landmarks(ref_pts)
-                except Exception:
-                    use_fixed_indices = False
-
-        use_positional = self.source == "realigned"
+        fixed_indices = (470, 276, 0, 272)
         for i, poly in enumerate(self.meshes):
             is_red = self.mesh_is_red[i]
             offset_x = self.shift_amount if is_red else -self.shift_amount
             
             pts = poly_points_numpy(poly)
             try:
-                if use_fixed_indices and fixed_indices is not None:
-                    h, t, l, m = fixed_indices
-                elif use_positional:
-                    h, t, l, m = find_landmarks_by_position(pts)
-                else:
-                    h, t, l, m = find_anatomical_landmarks(pts)
+                r_idx, b_idx, y_idx, g_idx = fixed_indices
+                positions = [pts[r_idx], pts[b_idx], pts[y_idx], pts[g_idx]]
             except Exception:
                 self.landmark_actors_per_subject.append([])
                 continue
-            positions = [pts[h], pts[t], pts[l], pts[m]]
             subject_actors = []
             for color, pos in zip(landmark_colors, positions):
                 sphere = vtk.vtkSphereSource()

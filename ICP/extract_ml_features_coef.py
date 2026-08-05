@@ -24,19 +24,24 @@ def prompt_folder(title):
 # Group Classification
 # =============================================================================
 def classify_subject(subject_name):
-    is_left_side = subject_name.startswith("left_")
+    is_left_side = subject_name.startswith("left_") or subject_name.startswith("lh_") or "_lh" in subject_name.lower()
+    name_upper = subject_name.upper()
     
-    # 1. Healthy Control (0)
-    if "_Healthy" in subject_name or "HFH_" in subject_name:
+    # 1. Healthy Control / Normal (0)
+    if "_HEALTHY" in name_upper or "HEALTHY" in name_upper or "HFH_" in name_upper or "NORMAL" in name_upper:
         return "Healthy Control", 0
     
     # 2. Ipsilateral TLE (Diseased) (1)
-    elif (is_left_side and "_Left-TLE" in subject_name) or (not is_left_side and "_Right-TLE" in subject_name):
+    elif (is_left_side and "LEFT-TLE" in name_upper) or (not is_left_side and "RIGHT-TLE" in name_upper):
         return "Ipsilateral TLE (Diseased)", 1
         
     # 3. Contralateral TLE (Healthy-side) (2)
-    elif (is_left_side and "_Right-TLE" in subject_name) or (not is_left_side and "_Left-TLE" in subject_name):
+    elif (is_left_side and "RIGHT-TLE" in name_upper) or (not is_left_side and "LEFT-TLE" in name_upper):
         return "Contralateral TLE (Healthy-side)", 2
+        
+    # 4. General TLE (1)
+    elif "TLE" in name_upper:
+        return "Ipsilateral TLE (Diseased)", 1
         
     return "Unknown", -1
 
@@ -97,6 +102,9 @@ def main():
     if not coef_files:
         coef_files = sorted(glob.glob(os.path.join(spharm_dir, "*_SPHARM_ellalign.coef")))
         source = "ellalign"
+    if not coef_files:
+        coef_files = sorted(glob.glob(os.path.join(spharm_dir, "*.coef")))
+        source = "coef"
 
     if not coef_files:
         print(f"Error: No SPHARM .coef files found in {spharm_dir}")
@@ -117,9 +125,11 @@ def main():
     print(f"Number of SPHARM coefficients per subject: {num_coeffs} (total {num_coeffs * 3} values)")
 
     # 3. สร้างหัวตาราง (Header)
-    header = ["Subject", "Group_Name", "Group_Label"]
-    for idx in range(num_coeffs):
-        header.extend([f"coef_x_{idx}", f"coef_y_{idx}", f"coef_z_{idx}"])
+    header = ["Subject", "Group", "Class", "BinaryClass"] + [f"Coef_{i+1}" for i in range(num_coeffs * 3)]
+
+    # ตั้งชื่อไฟล์เอาท์พุตตามโฟลเดอร์ที่เลือก เพื่อไม่ให้เขียนทับกัน
+    folder_basename = os.path.basename(spharm_dir.rstrip("\\/"))
+    coef_csv_path = os.path.join(ml_output_dir, f"{folder_basename}_coef_features.csv")
 
     with open(coef_csv_path, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -135,6 +145,7 @@ def main():
 
             # จัดกลุ่ม
             group_name, group_label = classify_subject(subject_name)
+            binary_class = 1 if group_label == 1 else 0
 
             # โหลดสัมประสิทธิ์
             coeffs = parse_coef(filepath)
@@ -145,7 +156,7 @@ def main():
             flat_coeffs = np.array(coeffs).ravel() # ขนาด (3 * num_coeffs,)
 
             # ประกอบข้อมูลแถว
-            row = [subject_name, group_name, group_label]
+            row = [subject_name, group_name, group_label, binary_class]
             row.extend(["{:.8f}".format(val) for val in flat_coeffs])
             writer.writerow(row)
 

@@ -52,24 +52,43 @@ class PLSDAAugmentedViewer:
     def __init__(self, aug_dir):
         self.aug_dir = aug_dir.replace("\\", "/")
 
-        # 1. ค้นหาไฟล์ VTK ในโฟลเดอร์ Healthy และ Diseased
+        # 1. ค้นหาไฟล์ VTK ในโฟลเดอร์โดยตรง (หรือในโฟลเดอร์ย่อยย้อนหลังเพื่อความเข้ากันได้)
         self.files = []
         self.class_labels = []
 
-        healthy_files = sorted(glob.glob(os.path.join(self.aug_dir, "Healthy", "*.vtk")))
-        self.files.extend(healthy_files)
-        self.class_labels.extend(["Healthy"] * len(healthy_files))
+        direct_files = sorted(glob.glob(os.path.join(self.aug_dir, "*.vtk")))
+        
+        healthy_count = 0
+        diseased_count = 0
+        
+        if direct_files:
+            for f in direct_files:
+                self.files.append(f)
+                basename = os.path.basename(f)
+                if "healthy" in basename.lower() or "normal" in basename.lower():
+                    self.class_labels.append("Healthy")
+                    healthy_count += 1
+                else:
+                    self.class_labels.append("Diseased")
+                    diseased_count += 1
+        else:
+            # ย้อนกลับไปค้นหาในโฟลเดอร์ย่อย (Healthy/Diseased) เผื่อรันแบบเก่า
+            healthy_files = sorted(glob.glob(os.path.join(self.aug_dir, "Healthy", "*.vtk")))
+            self.files.extend(healthy_files)
+            self.class_labels.extend(["Healthy"] * len(healthy_files))
+            healthy_count = len(healthy_files)
 
-        diseased_files = sorted(glob.glob(os.path.join(self.aug_dir, "Diseased", "*.vtk")))
-        self.files.extend(diseased_files)
-        self.class_labels.extend(["Diseased"] * len(diseased_files))
+            diseased_files = sorted(glob.glob(os.path.join(self.aug_dir, "Diseased", "*.vtk")))
+            self.files.extend(diseased_files)
+            self.class_labels.extend(["Diseased"] * len(diseased_files))
+            diseased_count = len(diseased_files)
 
         if not self.files:
             print(f"[ERROR] No augmented VTK files found in: {self.aug_dir}")
             self.meshes = []
             return
 
-        print(f"Found {len(self.files)} augmented meshes ({len(healthy_files)} Healthy, {len(diseased_files)} Diseased).")
+        print(f"Found {len(self.files)} augmented meshes ({healthy_count} Healthy, {diseased_count} Diseased).")
 
         # 2. โหลดไฟล์ Metadata CSV
         self.metadata = {}
